@@ -18,6 +18,11 @@ import java.util.*;
  * are returned as {@code null}. {@code str#} and text {@code strL} values are
  * returned as {@link String}, binary {@code strL} values as {@code byte[]}.
  * Alias variables (formats 120/121) hold no data in the file and read as {@code null}.
+ *
+ * <p>To read part of a dataset, call {@link #selectVariables} and/or
+ * {@link #selectObservations} before {@link #read()}. Unselected rows and
+ * columns are skipped by byte count rather than decoded, and only the strLs
+ * the selection refers to are loaded.
  */
 public class StataReader implements AutoCloseable {
 
@@ -31,8 +36,14 @@ public class StataReader implements AutoCloseable {
     private boolean readCalled;
     private DtaLayout layout;
     private ByteOrder byteOrder;
+    private int totalVars;
+    private long totalObs;
     private int numVars;
     private int numObs;
+    /** Variables to read, in output order; null reads all of them in file order. */
+    private List<String> selectedVars;
+    private long obsFrom = 0;
+    private long obsTo = Long.MAX_VALUE;
     private String datasetLabel = "";
     private String timestamp = "";
     private List<String> varNames = List.of();
@@ -73,15 +84,73 @@ public class StataReader implements AutoCloseable {
     }
 
     /**
-     * Reads and parses the Stata dataset. May be called only once.
+     * Reads only the named variables, in the order given. Call before {@link #read()}.
+     * The metadata getters then describe just these variables, and each
+     * observation map holds just these keys. Names are checked by {@code read()},
+     * which throws {@link IllegalArgumentException} for a name not in the file.
+     * Unselected variables are skipped without being decoded.
      *
-     * @throws IOException if an I/O error occurs, including {@link EOFException} for a truncated file
-     * @throws StataFormatException if the file is not a supported .dta file
+     * @throws IllegalArgumentException if a name is repeated
+     * @throws IllegalStateException    if {@code read()} has already been called
      */
-    public void read() throws IOException, StataFormatException {
+    public StataReader selectVariables(String... names) {
+        return selectVariables(Arrays.asList(names));
+    }
+
+    /** Collection form of {@link #selectVariables(String...)}. */
+    public StataReader selectVariables(Collection<String> names) {
+        checkNotRead();
+        List<String> copy = new ArrayList<>(names.size());
+        Set<String> seen = new HashSet<>();
+        for (String name : names) {
+            Objects.requireNonNull(name, "variable name");
+            if (!seen.add(name)) {
+                throw new IllegalArgumentException("Variable selected twice: " + name);
+            }
+            copy.add(name);
+        }
+        selectedVars = copy;
+        return this;
+    }
+
+    /**
+     * Reads only observations {@code from} (inclusive) to {@code to} (exclusive),
+     * 0-based. Call before {@link #read()}. The range is clamped to the dataset,
+     * so a range past the end reads fewer (or no) observations. Afterwards
+     * {@link #getObservation(int) getObservation(0)} is observation {@code from}
+     * of the file; {@link #getTotalNumObs()} still reports the file's size.
+     * Rows outside the range are skipped without being decoded.
+     *
+     * @throws IllegalArgumentException if {@code from < 0} or {@code to < from}
+     * @throws IllegalStateException    if {@code read()} has already been called
+     */
+    public StataReader selectObservations(long from, long to) {
+        checkNotRead();
+        if (from < 0 || to < from) {
+            throw new IllegalArgumentException("Invalid observation range [" + from + ", " + to + ")");
+        }
+        obsFrom = from;
+        obsTo = to;
+        return this;
+    }
+
+    private void checkNotRead() {
         if (readCalled) {
             throw new IllegalStateException("read() has already been called");
         }
+    }
+
+    /**
+     * Reads and parses the Stata dataset, or the part chosen with
+     * {@link #selectVariables} and {@link #selectObservations}. May be called only once.
+     *
+     * @throws IOException if an I/O error occurs, including {@link EOFException} for a truncated file
+     * @throws StataFormatException if the file is not a supported .dta file, or the selection
+     *                              holds more than {@link Integer#MAX_VALUE} observations
+     * @throws IllegalArgumentException if a selected variable is not in the file
+     */
+    public void read() throws IOException, StataFormatException {
+        checkNotRead();
         readCalled = true;
 
         DtaInput input = new DtaInput(in);
@@ -114,18 +183,18 @@ public class StataReader implements AutoCloseable {
         input.skip(2); // filetype, unused
 
         Charset cs = layout.charset();
-        numVars = input.u16();
-        numObs = toObsCount(input.u32());
+        totalVars = input.u16();
+        totalObs = input.u32();
         datasetLabel = input.fixedString(DtaLayout.LEGACY_DATA_LABEL_LEN, cs);
         timestamp = input.fixedString(DtaLayout.LEGACY_TIMESTAMP_LEN, cs);
 
-        List<StataVarType> types = new ArrayList<>(numVars);
-        for (int i = 0; i < numVars; i++) {
+        List<StataVarType> types = new ArrayList<>(totalVars);
+        for (int i = 0; i < totalVars; i++) {
             types.add(StataVarType.fromLegacyCode(input.u8()));
         }
         varTypes = types;
         varNames = readStrings(input, layout.varNameLen());
-        input.skip((numVars + 1L) * layout.sortEntryBytes());
+        input.skip((totalVars + 1L) * layout.sortEntryBytes());
         fmtList = readStrings(input, layout.formatLen());
         lblList = readStrings(input, layout.labelNameLen());
         varLabels = readStrings(input, layout.varLabelLen());
@@ -140,7 +209,8 @@ public class StataReader implements AutoCloseable {
             input.skip(len);
         }
 
-        List<Map<String, Object>> rows = readData(input);
+        int[] columns = selectedColumns();
+        List<Map<String, Object>> rows = readData(input, columns, new HashSet<>());
 
         Map<String, Map<Integer, String>> labels = new LinkedHashMap<>();
         while (input.peek() != -1) {
@@ -149,7 +219,7 @@ public class StataReader implements AutoCloseable {
             input.skip(3); // padding
             labels.put(name, readValueLabelTable(input, len));
         }
-        finish(rows, labels);
+        finish(columns, rows, labels);
     }
 
     // Formats 117-119: <stata_dta> with positional, tagged sections.
@@ -177,9 +247,12 @@ public class StataReader implements AutoCloseable {
 
         Charset cs = layout.charset();
         input.expect("</byteorder><K>");
-        numVars = (int) input.uN(layout.kBytes());
+        totalVars = toCount(input.uN(layout.kBytes()), "variables");
         input.expect("</K><N>");
-        numObs = toObsCount(input.uN(layout.nBytes()));
+        totalObs = input.uN(layout.nBytes());
+        if (totalObs < 0) {
+            throw new StataFormatException("Invalid observation count");
+        }
         input.expect("</N><label>");
         datasetLabel = new String(input.bytes((int) input.uN(layout.dataLabelLenBytes())), cs);
         input.expect("</label><timestamp>");
@@ -191,8 +264,8 @@ public class StataReader implements AutoCloseable {
         input.expect("</map>");
 
         input.expect("<variable_types>");
-        List<StataVarType> types = new ArrayList<>(numVars);
-        for (int i = 0; i < numVars; i++) {
+        List<StataVarType> types = new ArrayList<>(Math.min(totalVars, 1 << 16));
+        for (int i = 0; i < totalVars; i++) {
             StataVarType type = StataVarType.fromTaggedCode(input.u16());
             if (type.isAlias() && !layout.allowsAlias()) {
                 throw new StataFormatException("Alias variable in format " + layout.release());
@@ -206,7 +279,7 @@ public class StataReader implements AutoCloseable {
         varNames = readStrings(input, layout.varNameLen());
         input.expect("</varnames>");
         input.expect("<sortlist>");
-        input.skip((numVars + 1L) * layout.sortEntryBytes());
+        input.skip((totalVars + 1L) * layout.sortEntryBytes());
         input.expect("</sortlist>");
         input.expect("<formats>");
         fmtList = readStrings(input, layout.formatLen());
@@ -226,27 +299,31 @@ public class StataReader implements AutoCloseable {
         }
         input.expect("</characteristics>");
 
+        int[] columns = selectedColumns();
         input.expect("<data>");
-        List<Map<String, Object>> rows = readData(input);
+        Set<StrLRef> needed = new HashSet<>();
+        List<Map<String, Object>> rows = readData(input, columns, needed);
         input.expect("</data>");
 
+        // Load only the GSOs that the cells read refer to. A cell may link to a
+        // GSO first defined by another variable or observation (spec 5.11.1),
+        // so this goes by the references collected, not by the selection.
         input.expect("<strls>");
         Map<StrLRef, Object> strls = new HashMap<>();
         while (input.nextIs("GSO")) {
             input.expect("GSO");
-            long v = input.u32();
-            long o = input.uN(layout.gsoOBytes());
+            StrLRef key = new StrLRef(input.u32(), input.uN(layout.gsoOBytes()));
             int t = input.u8();
-            byte[] contents = input.bytes(toArrayLength(input.u32()));
-            Object value;
-            if (t == GSO_ASCII) {
-                value = DtaInput.cString(contents, 0, contents.length, cs);
-            } else if (t == GSO_BINARY) {
-                value = contents;
-            } else {
+            if (t != GSO_ASCII && t != GSO_BINARY) {
                 throw new StataFormatException("Invalid strL type: " + t);
             }
-            strls.put(new StrLRef(v, o), value);
+            long len = input.u32();
+            if (!needed.contains(key)) {
+                input.skip(len);
+                continue;
+            }
+            byte[] contents = input.bytes(toArrayLength(len));
+            strls.put(key, t == GSO_ASCII ? DtaInput.cString(contents, 0, contents.length, cs) : contents);
         }
         input.expect("</strls>");
         resolveStrLs(rows, strls);
@@ -264,28 +341,108 @@ public class StataReader implements AutoCloseable {
         input.expect("</value_labels>");
         input.expect("</stata_dta>");
 
-        finish(rows, labels);
+        finish(columns, rows, labels);
     }
 
     private List<String> readStrings(DtaInput input, int width) throws IOException {
-        List<String> result = new ArrayList<>(numVars);
-        for (int i = 0; i < numVars; i++) {
+        List<String> result = new ArrayList<>(Math.min(totalVars, 1 << 16));
+        for (int i = 0; i < totalVars; i++) {
             result.add(input.fixedString(width, layout.charset()));
         }
         return result;
     }
 
-    private List<Map<String, Object>> readData(DtaInput input) throws IOException {
+    /** File index of each variable to read, in output order. */
+    private int[] selectedColumns() {
+        if (selectedVars == null) {
+            int[] all = new int[totalVars];
+            for (int i = 0; i < all.length; i++) {
+                all[i] = i;
+            }
+            return all;
+        }
+        Map<String, Integer> index = new HashMap<>();
+        for (int i = 0; i < varNames.size(); i++) {
+            index.put(varNames.get(i), i);
+        }
+        int[] columns = new int[selectedVars.size()];
+        for (int i = 0; i < columns.length; i++) {
+            Integer at = index.get(selectedVars.get(i));
+            if (at == null) {
+                throw new IllegalArgumentException("Variable not found: " + selectedVars.get(i));
+            }
+            columns[i] = at;
+        }
+        return columns;
+    }
+
+    /**
+     * Reads the selected rows and columns of {@code <data>}, skipping the rest
+     * by byte count (every row has the same width). Adds each strL reference
+     * read to {@code strlRefs}. Leaves the input just past the last row.
+     */
+    private List<Map<String, Object>> readData(DtaInput input, int[] columns, Set<StrLRef> strlRefs)
+            throws IOException, StataFormatException {
+        int[] outPos = new int[totalVars];
+        Arrays.fill(outPos, -1);
+        for (int i = 0; i < columns.length; i++) {
+            outPos[columns[i]] = i;
+        }
+        String[] names = new String[columns.length];
+        for (int i = 0; i < columns.length; i++) {
+            names[i] = varNames.get(columns[i]);
+        }
+        long rowWidth = 0;
+        for (StataVarType t : varTypes) {
+            rowWidth += t.getByteWidth();
+        }
+
+        long first = Math.min(obsFrom, totalObs);
+        long end = Math.min(obsTo, totalObs);
+        if (end - first > Integer.MAX_VALUE) {
+            throw new StataFormatException("Dataset has " + totalObs + " observations; at most "
+                    + Integer.MAX_VALUE + " can be read at once. Use selectObservations to read a range.");
+        }
+        numObs = (int) (end - first);
+
+        // Bytes to skip before the next value read; merges adjacent skips across columns and rows.
+        long pending = bytes(first, rowWidth);
         // Cap the preallocation so a corrupt N cannot trigger a huge allocation.
         List<Map<String, Object>> rows = new ArrayList<>(Math.min(numObs, 1 << 16));
         for (int obs = 0; obs < numObs; obs++) {
+            Object[] values = new Object[columns.length];
+            for (int var = 0; var < totalVars; var++) {
+                StataVarType type = varTypes.get(var);
+                if (outPos[var] < 0) {
+                    pending += type.getByteWidth();
+                    continue;
+                }
+                if (pending > 0) {
+                    input.skip(pending);
+                    pending = 0;
+                }
+                Object value = readValue(input, type);
+                if (value instanceof StrLRef ref) {
+                    strlRefs.add(ref);
+                }
+                values[outPos[var]] = value;
+            }
             Map<String, Object> row = new LinkedHashMap<>();
-            for (int var = 0; var < numVars; var++) {
-                row.put(varNames.get(var), readValue(input, varTypes.get(var)));
+            for (int i = 0; i < values.length; i++) {
+                row.put(names[i], values[i]);
             }
             rows.add(row);
         }
+        input.skip(pending + bytes(totalObs - end, rowWidth));
         return rows;
+    }
+
+    private static long bytes(long rows, long rowWidth) throws StataFormatException {
+        try {
+            return Math.multiplyExact(rows, rowWidth);
+        } catch (ArithmeticException e) {
+            throw new StataFormatException("Data section too large", e);
+        }
     }
 
     private Object readValue(DtaInput input, StataVarType type) throws IOException {
@@ -376,18 +533,34 @@ public class StataReader implements AutoCloseable {
         }
     }
 
-    private void finish(List<Map<String, Object>> rows, Map<String, Map<Integer, String>> labels) {
+    /** Freezes the rows and narrows the per-variable metadata to the selected columns. */
+    private void finish(int[] columns, List<Map<String, Object>> rows, Map<String, Map<Integer, String>> labels) {
         List<Map<String, Object>> frozen = new ArrayList<>(rows.size());
         for (Map<String, Object> row : rows) {
             frozen.add(Collections.unmodifiableMap(row));
         }
         data = Collections.unmodifiableList(frozen);
         valueLabels = Collections.unmodifiableMap(labels);
+
+        numVars = columns.length;
+        varNames = project(varNames, columns);
+        varTypes = project(varTypes, columns);
+        varLabels = project(varLabels, columns);
+        fmtList = project(fmtList, columns);
+        lblList = project(lblList, columns);
     }
 
-    private static int toObsCount(long n) throws StataFormatException {
+    private static <T> List<T> project(List<T> all, int[] columns) {
+        List<T> result = new ArrayList<>(columns.length);
+        for (int c : columns) {
+            result.add(all.get(c));
+        }
+        return result;
+    }
+
+    private static int toCount(long n, String what) throws StataFormatException {
         if (n > Integer.MAX_VALUE) {
-            throw new StataFormatException("Too many observations: " + n);
+            throw new StataFormatException("Too many " + what + ": " + n);
         }
         return (int) n;
     }
@@ -410,12 +583,24 @@ public class StataReader implements AutoCloseable {
         return byteOrder;
     }
 
+    /** Returns the number of variables read: all of them, or those selected. */
     public int getNumVars() {
         return numVars;
     }
 
+    /** Returns the number of observations read: all of them, or those in the selected range. */
     public int getNumObs() {
         return numObs;
+    }
+
+    /** Returns the number of variables in the file, regardless of any selection. */
+    public int getTotalNumVars() {
+        return totalVars;
+    }
+
+    /** Returns the number of observations in the file, regardless of any selection. */
+    public long getTotalNumObs() {
+        return totalObs;
     }
 
     public String getDatasetLabel() {

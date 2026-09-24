@@ -119,7 +119,7 @@ NaN (which isn't valid in a `.dta` file) is also returned as `null`. The reader 
 - In `<data>`, a strL cell is 8 bytes: **v then o**, each in the file's byte order. The split is 4/4 (117), 2/6 (118/120) or 3/5 (119/121).
   - The dta spec's big-endian example: `0005 00000000000001` means (v=5, o=1).
 - (0,0) means an empty string.
-- Each cell is first stored as a placeholder (`StrLRef`). After `<strls>` has been read, the placeholders are replaced with the real contents. A reference with no matching GSO record raises `StataFormatException`.
+- Each cell is first stored as a placeholder (`StrLRef`), and its (v,o) is added to a set of needed references. While reading `<strls>`, only GSOs in that set are loaded; the rest are skipped by length. A needed GSO may belong to another variable or observation, because Stata and pandas link equal values to the first occurrence. The placeholders are then replaced with the real contents. A reference with no matching GSO record raises `StataFormatException`.
 - GSO record: `GSO`, v (u32), o (u32 in 117, u64 from 118), t (u8), length (u32), contents.
   - t = 130 is text: decoded with the file's charset, up to the NUL terminator.
   - t = 129 is binary: returned as `byte[]`.

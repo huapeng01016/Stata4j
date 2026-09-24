@@ -20,14 +20,25 @@ The main class for reading Stata dataset files.
 
 ##### Reading Data
 
-- `void read()` - Reads and parses the entire Stata dataset. Must be called before accessing data, and may be called only once per reader (a second call throws `IllegalStateException`).
+- `void read()` - Reads and parses the Stata dataset, or the selected part of it. Must be called before accessing data, and may be called only once per reader (a second call throws `IllegalStateException`). Throws `IllegalArgumentException` if a selected variable isn't in the file.
+
+##### Selecting Part of a Dataset
+
+Call these before `read()`; afterwards they throw `IllegalStateException`. Both return the reader, so they can be chained.
+
+- `StataReader selectVariables(String... names)` / `selectVariables(Collection<String> names)` - Reads only these variables, **in the order given**. The metadata getters (`getVarNames`, `getVarTypes`, `getVarLabels`, `getFmtList`, `getValueLabelNames`) then cover only these variables, and each observation map has only these keys. A repeated name throws `IllegalArgumentException`. An empty selection reads no variables, but still counts the observations.
+- `StataReader selectObservations(long from, long to)` - Reads only observations `from` (inclusive) to `to` (exclusive), 0-based. The range is clamped to the dataset, so `selectObservations(0, 1000)` on a 500-observation file reads 500, and a range past the end reads none. After reading, index 0 of `getObservation`/`getValue`/`getData` is observation `from` of the file. Throws `IllegalArgumentException` if `from < 0` or `to < from`.
+
+`getValueLabels()` still returns every value-label set in the file.
 
 ##### Metadata Access
 
 - `String getFormat()` - Returns the Stata file format release (e.g. "115", "117", "118"), or `null` before `read()`
 - `ByteOrder getByteOrder()` - Returns the byte order the file was written in
-- `int getNumVars()` - Returns the number of variables in the dataset
-- `int getNumObs()` - Returns the number of observations in the dataset
+- `int getNumVars()` - Returns the number of variables read (all, or the selected ones)
+- `int getNumObs()` - Returns the number of observations read (all, or those in the selected range)
+- `int getTotalNumVars()` - Returns the number of variables in the file, whatever the selection
+- `long getTotalNumObs()` - Returns the number of observations in the file, whatever the selection. It's a `long` because a file can hold more than `Integer.MAX_VALUE` observations; such a file must be read in ranges.
 - `String getDatasetLabel()` - Returns the dataset label
 - `String getTimestamp()` - Returns the dataset timestamp
 - `List<String> getVarNames()` - Returns an unmodifiable list of variable names
@@ -225,6 +236,36 @@ try (StataReader in = new StataReader("old.dta");
 
 Extended missing values (`.a`-`.z`) are read as `null` and so are written back as `.`.
 
+### Reading Part of a Dataset
+
+```java
+try (StataReader reader = new StataReader("big.dta")) {
+    reader.selectVariables("id", "income").selectObservations(1_000, 2_000);
+    reader.read();
+    for (Map<String, Object> obs : reader.getData()) {
+        System.out.println(obs);   // {id=..., income=...}
+    }
+}
+```
+
+### Processing a Large File in Chunks
+
+A reader reads once, so open a new reader for each chunk:
+
+```java
+long total;
+try (StataReader probe = new StataReader("big.dta")) {
+    probe.selectVariables().read();   // no variables: the data is skipped, not decoded
+    total = probe.getTotalNumObs();
+}
+for (long from = 0; from < total; from += 100_000) {
+    try (StataReader chunk = new StataReader("big.dta")) {
+        chunk.selectObservations(from, from + 100_000).read();
+        process(chunk.getData());
+    }
+}
+```
+
 ### Applying Value Labels
 
 ```java
@@ -278,7 +319,8 @@ StataReader and StataWriter instances are **not thread-safe**. Each thread shoul
 
 ## Performance Considerations
 
-- The entire dataset is loaded into memory when `read()` is called
+- `read()` loads the whole dataset into memory, or only the selected part if `selectVariables`/`selectObservations` were used
+- When a range is selected, rows outside it are skipped without being read, which is a seek on a `FileInputStream`. Unselected variables are skipped without being decoded or stored, but because they sit inside each row they are still read from the stream. Only the strL contents that selected cells refer to are loaded.
 - `StataWriter` keeps every observation in memory until `write()`, which writes the file in two passes: one to measure section offsets, then the real one
 - For large datasets, ensure sufficient heap memory is available
 
@@ -286,6 +328,6 @@ StataReader and StataWriter instances are **not thread-safe**. Each thread shoul
 
 - Writes only formats 119, 120 and 121, and can't write alias variables, characteristics, a sort order, or extended missing values (`.a`-`.z`)
 - Does not support Stata file formats older than 113 (Stata 7 and earlier) or format 116
-- Datasets with more than 2,147,483,647 observations are not supported
+- At most 2,147,483,647 observations can be read at once; read a larger dataset in ranges with `selectObservations`
 - Characteristics (`char`) are skipped, so an alias variable's target frame and variable are not reported
 - Alias support in formats 120/121 assumes alias variables occupy no bytes in the data section (the published spec lists the type but not its width); it has been tested against synthesized files, not files saved by Stata

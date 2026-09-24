@@ -3,7 +3,7 @@ Java library for Stata data management
 
 ## Features
 
-- Read Stata dataset files (.dta)
+- Read Stata dataset files (.dta), in full or just selected variables and a range of observations
 - Write Stata dataset files in format 119, 120 or 121, big- or little-endian
 - Support for Stata file formats 113-115 and 117-121 (Stata 8 and later)
 - Handle both little-endian and big-endian byte orders
@@ -55,12 +55,30 @@ try (StataReader reader = new StataReader("data.dta")) {
 }
 ```
 
+### Reading Part of a Dataset
+
+Select variables and/or a range of observations before calling `read()`. Rows outside the range are skipped, not decoded, so reading a slice of a large file is fast.
+
+```java
+try (StataReader reader = new StataReader("big.dta")) {
+    reader.selectVariables("id", "income")       // in this order
+          .selectObservations(1_000, 2_000);     // 0-based, from inclusive, to exclusive
+    reader.read();
+
+    reader.getNumObs();        // 1000 (observations read)
+    reader.getTotalNumObs();   // observations in the file
+    reader.getObservation(0);  // observation 1,000 of the file: {id=..., income=...}
+}
+```
+
 ### Available Methods
 
 - `read()` - Read and parse the Stata dataset
+- `selectVariables(String...)` - Before `read()`: read only these variables, in this order
+- `selectObservations(long from, long to)` - Before `read()`: read only observations `from` (inclusive) to `to` (exclusive)
 - `getFormat()` - Get the Stata file format version
-- `getNumVars()` - Get the number of variables
-- `getNumObs()` - Get the number of observations
+- `getNumVars()` / `getNumObs()` - Get the number of variables / observations read
+- `getTotalNumVars()` / `getTotalNumObs()` - Get the number of variables / observations in the file
 - `getDatasetLabel()` - Get the dataset label
 - `getTimestamp()` - Get the timestamp
 - `getVarNames()` - Get the list of variable names

@@ -8,13 +8,14 @@
 ./mvnw test -Dtest=StataReaderTest#readsAliasFixture # one method, all its parameterized cases
 ```
 
-There are 61 tests, counting each parameterized case: 20 in `StataReaderTest`, 5 in `StataVarTypeTest` and 36 in `StataWriterTest`.
+There are 76 tests, counting each parameterized case: 20 in `StataReaderTest`, 15 in `StataReaderSubsetTest`, 5 in `StataVarTypeTest` and 36 in `StataWriterTest`.
 
 ## Test sources
 
 | File | Role |
 |---|---|
 | `StataReaderTest` | Reads every fixture and asserts metadata, types, each value, missing values, strL, value labels and accessors; also covers the error paths |
+| `StataReaderSubsetTest` | Selecting variables and observation ranges: every subset read must equal the same projection of a full read |
 | `StataWriterTest` | Round trips through `StataReader` for 119/120/121 in both byte orders, `<map>` offsets, exact strL cell bytes, timestamps, copying a fixture between formats, and every validation rule |
 | `StataVarTypeTest` | Type-code mapping for both families, width limits, predicates, equality and `toString` |
 | `LegacyDtaBuilder` | Builds 113/115 files byte by byte, in either byte order |
@@ -80,6 +81,20 @@ This covers what pandas can't write. It builds 113 and 115 files and is exercise
 | `readOnlyOnce` | second `read()` | `IllegalStateException` |
 | `accessorsValidateArguments` | out-of-range indexes, unknown name, modifying a row | IOOBE / IAE / UOE |
 | `missingFileThrows` | nonexistent path | `FileNotFoundException` |
+
+## Subset tests
+
+`StataReaderSubsetTest.subsetEqualsProjectionOfFullRead` runs over 10 files:
+- every pandas and synthesized fixture
+- legacy 113 LE and 115 BE from `LegacyDtaBuilder`
+- a writer-made 119 BE file with binary strLs
+
+Each file is read with 4 variable selections (all, none, a reversed pair, every other variable backwards) and 8 ranges (whole file, first row, from row 1, last row, one middle row, past the end, empty, entirely beyond the end). Every subset read must equal the same projection of a full read, in both metadata and data, including the key order in each row.
+
+Other tests:
+- **`resolvesStrLDefinedOutsideTheRange`:** in `v117.dta`, observation 3's strL cell points at observation 1's GSO. The test first checks that the fixture really does this, then reads only observation 3.
+- **`skipsRowsOutsideTheRangeWithoutReadingThem`:** counts the bytes pulled from the stream when reading the last 10 of 100,000 rows. The count must be under a tenth of the file.
+- **`hugeDatasetNeedsARange`:** patches N to 2^31. A full read must fail with a message naming `selectObservations`.
 
 ## Writer tests
 

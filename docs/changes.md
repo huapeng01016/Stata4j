@@ -1,5 +1,18 @@
 # Changes (September 2026)
 
+## Reading part of a dataset
+
+`StataReader` can now read a subset of variables and/or a range of observations instead of the whole dataset.
+
+- **API:** `selectVariables(String...)` / `selectVariables(Collection)` and `selectObservations(long from, long to)`, called before `read()`. `getNumVars()`/`getNumObs()` count what was read. The new `getTotalNumVars()`/`getTotalNumObs()` count what is in the file.
+- **Variables** come back in the order requested. The metadata lists are narrowed to match, and an unknown name makes `read()` throw `IllegalArgumentException`.
+- **Ranges** are 0-based and `[from, to)`, clamped to the dataset.
+- **Rows outside the range** are skipped by byte count, not decoded. Every row has the same width, so the reader seeks straight past them. Reading the last 10 rows of a 4.1 MB file reads about 20 KB from the stream.
+- **Unselected variables** are skipped without being decoded or stored. They are still read from the stream, because they are interleaved with the selected ones in each row.
+- **strLs:** only the contents that selected cells refer to are loaded; other GSOs are skipped. The set of references is collected while reading, because a cell may refer to a strL first defined by another observation (pandas and Stata do this for repeated values).
+- **Behavior change:** a dataset with more than 2,147,483,647 observations used to be rejected outright. It can now be read in ranges; a full read of one fails with a message pointing at `selectObservations`.
+- **Tests:** `StataReaderSubsetTest` (15 tests) checks that, for every kind of test file and many selections, a subset read equals the same projection of a full read.
+
 ## StataWriter
 
 Added `StataWriter`, which writes `.dta` files in **format 119, 120 or 121**, big- or little-endian (MSF or LSF). See [writer.md](writer.md) for the design and verification.
