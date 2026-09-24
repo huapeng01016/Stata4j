@@ -8,13 +8,14 @@
 ./mvnw test -Dtest=StataReaderTest#readsAliasFixture # one method, all its parameterized cases
 ```
 
-There are 25 tests: 20 in `StataReaderTest` (counting each parameterized case) and 5 in `StataVarTypeTest`.
+There are 61 tests, counting each parameterized case: 20 in `StataReaderTest`, 5 in `StataVarTypeTest` and 36 in `StataWriterTest`.
 
 ## Test sources
 
 | File | Role |
 |---|---|
 | `StataReaderTest` | Reads every fixture and asserts metadata, types, each value, missing values, strL, value labels and accessors; also covers the error paths |
+| `StataWriterTest` | Round trips through `StataReader` for 119/120/121 in both byte orders, `<map>` offsets, exact strL cell bytes, timestamps, copying a fixture between formats, and every validation rule |
 | `StataVarTypeTest` | Type-code mapping for both families, width limits, predicates, equality and `toString` |
 | `LegacyDtaBuilder` | Builds 113/115 files byte by byte, in either byte order |
 | `src/test/resources/fixtures/*.dta` | Checked-in fixture files |
@@ -80,6 +81,16 @@ This covers what pandas can't write. It builds 113 and 115 files and is exercise
 | `accessorsValidateArguments` | out-of-range indexes, unknown name, modifying a row | IOOBE / IAE / UOE |
 | `missingFileThrows` | nonexistent path | `FileNotFoundException` |
 
+## Writer tests
+
+`StataWriterTest` checks the writer against the reader, and also against things the reader doesn't depend on:
+- **`mapHoldsSectionOffsets`:** reads the 14 `<map>` entries straight from the bytes and compares them with where each tag actually is.
+- **`strlCellLayoutFollowsSpec`:** asserts the exact hex of a strL cell for each layout and byte order, based on the spec's MSF example.
+- **`copiesDatasetBetweenFormats`:** runs the "copy a dataset" example from API.md on `v118.dta` and writes it as 121 big-endian. The copy must read back identical, including data, labels, formats and value labels.
+- **`rejectsOutOfRangeNumbers`:** tries the first missing code of each type, and the value just below each type's minimum.
+
+The writer was also checked once by hand against pandas, as described in [writer.md](writer.md#verification). That check isn't part of the automated suite because it needs Python and pandas.
+
 ## Gaps
 
 - No fixture saved by Stata itself. Fixtures come from pandas, a synthesis step, or the builder.
@@ -87,6 +98,7 @@ This covers what pandas can't write. It builds 113 and 115 files and is exercise
 - Big-endian strL isn't covered.
 - Binary strL (GSO type 129) isn't covered, because pandas only writes text strLs.
 - Format 114 comes from pandas, but 113 and 115 come only from `LegacyDtaBuilder`.
+- Writer output has not been opened in Stata itself.
 
 ## Updating fixtures
 

@@ -21,15 +21,8 @@ import java.util.*;
  */
 public class StataReader implements AutoCloseable {
 
-    /** Smallest stored value that Stata treats as missing, per numeric type. */
-    private static final byte BYTE_MISSING = 101;
-    private static final short INT_MISSING = 32741;
-    private static final int LONG_MISSING = 2147483621;
-    private static final float FLOAT_MISSING = Float.intBitsToFloat(0x7f000000);
-    private static final double DOUBLE_MISSING = Double.longBitsToDouble(0x7fe0000000000000L);
-
-    private static final int GSO_BINARY = 129;
-    private static final int GSO_ASCII = 130;
+    static final int GSO_BINARY = 129;
+    static final int GSO_ASCII = 130;
 
     /** A strL cell's reference into the {@code <strls>} section, resolved after it is read. */
     private record StrLRef(long v, long o) {}
@@ -299,23 +292,23 @@ public class StataReader implements AutoCloseable {
         switch (type.kind()) {
             case BYTE: {
                 byte b = input.i8();
-                return b >= BYTE_MISSING ? null : b;
+                return b >= DtaMissing.BYTE ? null : b;
             }
             case INT: {
                 short s = input.i16();
-                return s >= INT_MISSING ? null : s;
+                return s >= DtaMissing.INT ? null : s;
             }
             case LONG: {
                 int i = input.i32();
-                return i >= LONG_MISSING ? null : i;
+                return i >= DtaMissing.LONG ? null : i;
             }
             case FLOAT: {
                 float f = input.f32();
-                return (f >= FLOAT_MISSING || Float.isNaN(f)) ? null : f;
+                return (f >= DtaMissing.FLOAT || Float.isNaN(f)) ? null : f;
             }
             case DOUBLE: {
                 double d = input.f64();
-                return (d >= DOUBLE_MISSING || Double.isNaN(d)) ? null : d;
+                return (d >= DtaMissing.DOUBLE || Double.isNaN(d)) ? null : d;
             }
             case STR:
                 return input.fixedString(type.getByteWidth(), layout.charset());

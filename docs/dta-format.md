@@ -1,6 +1,6 @@
 # How Stata4j parses .dta files
 
-These notes describe the format as `StataReader` implements it. The authoritative references are Stata's own specifications: [dta](https://www.stata.com/help.cgi?dta) (118), [dta_119](https://www.stata.com/help.cgi?dta_119), [dta_120](https://www.stata.com/help.cgi?dta_120), [dta_121](https://www.stata.com/help.cgi?dta_121) and [dta_117](https://www.stata.com/help.cgi?dta_117) (117 and earlier).
+These notes describe the format as `StataReader` implements it. `StataWriter` writes the same tagged layout for 119–121; its choices are in [writer.md](writer.md). The authoritative references are Stata's own specifications: [dta](https://www.stata.com/help.cgi?dta) (118), [dta_119](https://www.stata.com/help.cgi?dta_119), [dta_120](https://www.stata.com/help.cgi?dta_120), [dta_121](https://www.stata.com/help.cgi?dta_121) and [dta_117](https://www.stata.com/help.cgi?dta_117) (117 and earlier).
 
 ## Supported releases
 

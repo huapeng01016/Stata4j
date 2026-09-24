@@ -4,6 +4,7 @@ Java library for Stata data management
 ## Features
 
 - Read Stata dataset files (.dta)
+- Write Stata dataset files in format 119, 120 or 121, big- or little-endian
 - Support for Stata file formats 113-115 and 117-121 (Stata 8 and later)
 - Handle both little-endian and big-endian byte orders
 - Support for all Stata variable types: numeric, `str1`-`str2045`, `strL` and `alias`
@@ -71,6 +72,33 @@ try (StataReader reader = new StataReader("data.dta")) {
 - `getObservation(int index)` - Get a specific observation by index
 - `getValue(int obs, int var)` / `getValue(int obs, String name)` - Get a single value
 
+### Writing a Stata Dataset
+
+```java
+import io.github.huapeng01016.stata4j.StataVarType;
+import io.github.huapeng01016.stata4j.StataWriter;
+import java.nio.ByteOrder;
+import java.util.Map;
+
+// Format 119, 120 or 121; big- or little-endian
+try (StataWriter writer = new StataWriter("out.dta", 119, ByteOrder.LITTLE_ENDIAN)) {
+    writer.setDatasetLabel("Survey results");
+    writer.addVariable("id", StataVarType.LONG, "Respondent ID")
+          .addVariable("name", StataVarType.str(20))
+          .addVariable("comment", StataVarType.STRL)
+          .addVariable("agree", StataVarType.BYTE);
+    writer.defineValueLabel("yesno", Map.of(0, "no", 1, "yes"))
+          .setValueLabel("agree", "yesno");
+
+    writer.addObservation(1, "Alice", "A long free-text answer", 1);
+    writer.addObservation(2, "Bob", null, null);   // null = missing (or "" for strings)
+
+    writer.write();   // required: close() alone does not write the file
+}
+```
+
+Values are validated as they are added: numbers must be in range for the variable's type, and strings must fit their `str#` width in UTF-8 bytes. Alias variables can't be written.
+
 ## Supported Formats
 
 Stata4j supports the following Stata file formats:
@@ -80,6 +108,8 @@ Stata4j supports the following Stata file formats:
 - **Format 118** - Stata 14 and later
 - **Format 119** - Stata 15 and later, datasets with more than 32,767 variables
 - **Formats 120, 121** - Stata 18 and later, datasets with alias variables (121: more than 32,767 variables)
+
+`StataReader` reads all of these. `StataWriter` writes 119, 120 and 121.
 
 Datasets with more than 2,147,483,647 observations are not supported.
 

@@ -1,21 +1,37 @@
-# Reader rework (September 2026)
+# Changes (September 2026)
 
-## Summary
+## StataWriter
+
+Added `StataWriter`, which writes `.dta` files in **format 119, 120 or 121**, big- or little-endian (MSF or LSF). See [writer.md](writer.md) for the design and verification.
+
+- **API:** declare variables (`addVariable`, `setVariableLabel`, `setFormat`, `setValueLabel`), define value labels (`defineValueLabel`), add observations (`addObservation` by position or by name), then call `write()`. `close()` doesn't write.
+- **Types:** byte, int, long, float, double, `str1`–`str2045`, and strL (text `String` or binary `byte[]`).
+- **Validation:** values are checked when added. Out-of-range numbers, strings too long for their `str#` width in UTF-8 bytes, invalid or reserved names, and alias variables are rejected with `IllegalArgumentException`.
+- **`<map>`:** filled in using two passes, one to measure section offsets and one to write, so any `OutputStream` works.
+- **Verification:** files in all six format/byte-order combinations were read back correctly by pandas, apart from big-endian strL, which pandas can't read. That is checked byte by byte against the spec's example instead.
+- **Supporting changes:** missing-value codes moved into the shared `DtaMissing` (used by both reader and writer); `DtaOutput` added as the write-side counterpart of `DtaInput`; package-private `StataVarType.toTaggedCode()` added.
+- **Tests:** 36 in `StataWriterTest`, bringing the suite to 61.
+
+Not supported by the writer: formats before 119, alias variables, extended missing values `.a`–`.z`, characteristics and sort order.
+
+## Reader rework
+
+### Summary
 
 Stata4j had two unrelated `.dta` readers, `StataReader` and `StataDatasetReader`, which came from separate Copilot pull requests. Neither could read files saved by Stata, and the build failed. They have been replaced by a single `StataReader` that reads formats 113–115 and 117–121 in either byte order. It is tested against real files written by pandas, plus files built byte by byte for cases pandas can't produce.
 
 The version stays at 0.1.0. Some public APIs changed; see [Breaking changes](#breaking-changes).
 
-## Problems in the previous code
+### Problems in the previous code
 
-### `StataReader`
+#### `StataReader`
 - It read the format version as three ASCII characters (`"115"`). In formats 113–115 the version is a single byte (`0x73` for 115).
 - It treated byte-order flag `0x01` as little-endian. In the dta spec `0x01` is HILO (big-endian) and `0x02` is LOHI (little-endian).
 - It accepted versions `"117"` and `"118"` but parsed them with the old binary layout. Files in those formats start with `<stata_dta>`, so they always failed.
 - It read the end of the expansion fields as 1 zero byte. The terminator is 5 bytes: a type byte of 0 and a 4-byte length of 0.
 - Its only data test passed because the test built its file with the same mistakes.
 
-### `StataDatasetReader`
+#### `StataDatasetReader`
 - It read the byte order from the wrong place in tagged files (it's `<byteorder>MSF|LSF</byteorder>`).
 - It assumed every string variable is 244 bytes wide.
 - It mapped type codes loosely: 1–244 and unknown codes all became `BYTE`, and strL wasn't handled.
@@ -23,22 +39,22 @@ The version stays at 0.1.0. Some public APIs changed; see [Breaking changes](#br
 - It always reported format 117.
 - Its test used JUnit 4 (`org.junit.Test`), which isn't on the classpath, so **`mvn test` failed to compile**.
 
-### Both
+#### Both
 - Missing values were detected as 127 / 32767 / 2147483647 / NaN. Stata's actual missing codes start at 101 (byte), 32741 (int), 2147483621 (long), 2^127 (float) and 2^1023 (double), and run up through `.a`–`.z`. Values like `.a` were therefore returned as numbers.
 - Value labels were never read.
 
-### Documentation
+#### Documentation
 - The docs contradicted each other on supported formats (115/117/118 in one place, 117/118/119 in another) and on the Java version (8 vs 17). They also named a `stata4j-1.0.0.jar` that the build doesn't produce.
 
-## What was done
+### What was done
 
-### One reader
+#### One reader
 - `StataReader` is the only reader. `StataDatasetReader`, `StataDatasetExample` and `StataDatasetReaderTest` were deleted.
 - `read()` looks at the first byte. `<` means a tagged file (117–121), which is parsed strictly in order: each expected tag is checked, not searched for. Otherwise the byte is taken as a release number (113–115) and the file is parsed with the old binary layout.
 - Everything that changes between releases (field widths, header sizes, character set) lives in one table, `DtaLayout`. Byte-order-aware reads are in `DtaInput`. Both are package-private.
 - A truncated file raises `EOFException`. A malformed or unsupported file raises `StataFormatException` with the offending tag or release in the message.
 
-### Format and data support
+#### Format and data support
 - Formats **113, 114, 115, 117, 118, 119, 120, 121**, big- or little-endian.
 - `str1`–`str2045`, `strL` (text and binary), and the `alias` type added in format 120.
 - All missing values (`.`, `.a`–`.z`) return `null`.
@@ -47,23 +63,23 @@ The version stays at 0.1.0. Some public APIs changed; see [Breaking changes](#br
 
 See [dta-format.md](dta-format.md) for details. Formats 120/121 rest on one assumption documented there.
 
-### New API
+#### New API
 - `StataReader.getValue(int obs, int var)` and `getValue(int obs, String name)`, carried over from the deleted reader.
 - `StataReader.getValueLabelNames()` and `getValueLabels()`.
 - `StataReader.getByteOrder()`.
 - `StataVarType.str(int)`, `STRL`, `ALIAS`, `isStrL()`, `isAlias()` and `getByteWidth()`.
 
-### Build and tooling
+#### Build and tooling
 - Added the Maven Wrapper (`mvnw`, `mvnw.cmd`, `.mvn/wrapper/maven-wrapper.properties`, pinned to Maven 3.9.16), so building needs only a JDK.
 - `pom.xml` now uses `maven.compiler.release=17` instead of `source`/`target`. This removes a warning when building on newer JDKs and checks the code against the Java 17 API.
 - Added `junit-jupiter-params` (test scope) for parameterized tests.
 - Added `/bin/` (the Eclipse build copy) to `.gitignore`.
 
-### Documentation
+#### Documentation
 - Rewrote README.md, API.md and GETTING_STARTED.md so they agree with the code.
 - Added `CLAUDE.md` (guidance for AI coding assistants) and this `docs/` folder.
 
-## Breaking changes
+### Breaking changes
 
 | Before | After | Why |
 |---|---|---|
@@ -75,7 +91,7 @@ See [dta-format.md](dta-format.md) for details. Formats 120/121 rest on one assu
 | Missing values were detected only at the top code / NaN | Every missing code, including `.a`–`.z`, returns `null` | Correctness |
 | `StataDatasetReader` | Removed; use `StataReader` | Duplicate implementation |
 
-### Migrating from `StataDatasetReader`
+#### Migrating from `StataDatasetReader`
 
 | `StataDatasetReader` | `StataReader` |
 |---|---|
@@ -88,7 +104,7 @@ See [dta-format.md](dta-format.md) for details. Formats 120/121 rest on one assu
 | `getValue(obs, var)` / `getValue(obs, name)` | Same signatures |
 | `printSummary()` / `printData(n)` | Removed; see `example/StataReaderExample` |
 
-### Migrating `StataVarType` usage
+#### Migrating `StataVarType` usage
 
 ```java
 // before
@@ -100,7 +116,7 @@ if (type.equals(StataVarType.str(10))) { … }
 if (type.isString() && !type.isStrL()) { int width = type.getStringLength(); }
 ```
 
-## Known limitations and open items
+### Known limitations and open items
 
 - **Formats 120/121 are unverified against Stata output.** The spec gives the alias type code but not its width in the data section. The reader assumes 0 bytes. A small file with an alias variable, saved by Stata 18 or later, would confirm it or show it's wrong; see [dta-format.md](dta-format.md#formats-120-and-121-alias-variables).
 - Characteristics are skipped, so an alias variable's target frame and variable aren't reported.

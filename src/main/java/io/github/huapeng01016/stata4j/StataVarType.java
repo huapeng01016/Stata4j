@@ -83,6 +83,21 @@ public final class StataVarType {
         }
     }
 
+    /** Inverse of {@link #fromTaggedCode}. */
+    int toTaggedCode() {
+        switch (kind) {
+            case STR: return width;
+            case STRL: return 32768;
+            case ALIAS: return 65525;
+            case DOUBLE: return 65526;
+            case FLOAT: return 65527;
+            case LONG: return 65528;
+            case INT: return 65529;
+            case BYTE: return 65530;
+            default: throw new AssertionError(kind);
+        }
+    }
+
     Kind kind() {
         return kind;
     }
