@@ -6,8 +6,8 @@ Stata4j is a Java library for reading Stata dataset (.dta) files. This guide wil
 
 ## Prerequisites
 
-- Java 8 or higher
-- Maven 3.x (for building from source)
+- Java 17 or higher
+- No Maven install is needed; the repository includes the Maven Wrapper (`mvnw` / `mvnw.cmd`)
 
 ## Installation
 
@@ -21,10 +21,12 @@ cd Stata4j
 
 2. Build the project:
 ```bash
-mvn clean package
+./mvnw clean package
 ```
 
-This will create `stata4j-1.0.0.jar` in the `target/` directory.
+On Windows (cmd or PowerShell), use `mvnw.cmd clean package`.
+
+This will create `stata4j-0.1.0.jar` in the `target/` directory.
 
 ## Basic Usage
 
@@ -33,28 +35,27 @@ This will create `stata4j-1.0.0.jar` in the `target/` directory.
 Create a file named `ReadStata.java`:
 
 ```java
-import io.github.huapeng01016.stata4j.StataDatasetReader;
+import io.github.huapeng01016.stata4j.StataFormatException;
+import io.github.huapeng01016.stata4j.StataReader;
 import java.io.IOException;
+import java.util.Map;
 
 public class ReadStata {
     public static void main(String[] args) {
-        try {
-            // Create a reader
-            StataDatasetReader reader = new StataDatasetReader("mydata.dta");
-            
-            // Read the dataset
+        try (StataReader reader = new StataReader("mydata.dta")) {
             reader.read();
             
-            // Print summary
-            reader.printSummary();
+            System.out.println("Format: " + reader.getFormat());
+            System.out.println(reader.getNumObs() + " observations, " + reader.getNumVars() + " variables");
             
             // Print first 10 observations
-            System.out.println("\nData:");
-            reader.printData(10);
-            
-        } catch (IOException e) {
+            int rows = Math.min(10, reader.getNumObs());
+            for (int i = 0; i < rows; i++) {
+                Map<String, Object> obs = reader.getObservation(i);
+                System.out.println(obs);
+            }
+        } catch (IOException | StataFormatException e) {
             System.err.println("Error: " + e.getMessage());
-            e.printStackTrace();
         }
     }
 }
@@ -64,16 +65,16 @@ public class ReadStata {
 
 ```bash
 # Compile
-javac -cp stata4j-1.0.0.jar ReadStata.java
+javac -cp stata4j-0.1.0.jar ReadStata.java
 
 # Run
-java -cp .:stata4j-1.0.0.jar ReadStata
+java -cp .:stata4j-0.1.0.jar ReadStata
 ```
 
 On Windows:
 ```cmd
-javac -cp stata4j-1.0.0.jar ReadStata.java
-java -cp .;stata4j-1.0.0.jar ReadStata
+javac -cp stata4j-0.1.0.jar ReadStata.java
+java -cp .;stata4j-0.1.0.jar ReadStata
 ```
 
 ## Working with Data
@@ -81,18 +82,15 @@ java -cp .;stata4j-1.0.0.jar ReadStata
 ### Accessing Dataset Information
 
 ```java
-StataDatasetReader reader = new StataDatasetReader("data.dta");
-reader.read();
+try (StataReader reader = new StataReader("data.dta")) {
+    reader.read();
 
-// Get basic information
-int numVars = reader.getNumberOfVariables();
-int numObs = reader.getNumberOfObservations();
-System.out.println("Dataset: " + numObs + " observations, " + numVars + " variables");
+    System.out.println("Dataset: " + reader.getNumObs() + " observations, "
+        + reader.getNumVars() + " variables");
 
-// Get variable names
-List<String> varNames = reader.getVariableNames();
-for (String name : varNames) {
-    System.out.println("Variable: " + name);
+    for (String name : reader.getVarNames()) {
+        System.out.println("Variable: " + name);
+    }
 }
 ```
 
@@ -103,52 +101,20 @@ for (String name : varNames) {
 Object value = reader.getValue(0, 0);
 
 // Read value by variable name
-Object valueByName = reader.getValue(0, "age");
-System.out.println("Age of first person: " + valueByName);
+Object age = reader.getValue(0, "age");
+System.out.println("Age of first person: " + age);
 ```
 
-### Getting All Data
-
-```java
-// Get all data as a 2D array
-Object[][] allData = reader.getData();
-
-// Process the data
-for (int i = 0; i < reader.getNumberOfObservations(); i++) {
-    for (int j = 0; j < reader.getNumberOfVariables(); j++) {
-        System.out.print(allData[i][j] + "\t");
-    }
-    System.out.println();
-}
-```
-
-## Supported Stata Formats
-
-Stata4j currently supports:
-- Stata 13 format (version 117)
-- Stata 14 format (version 118)
-- Stata 15+ format (version 119)
-
-## Variable Types
-
-The library handles the following Stata variable types:
-- `BYTE` - 1-byte integer
-- `INT` - 2-byte integer  
-- `LONG` - 4-byte integer
-- `FLOAT` - 4-byte floating point
-- `DOUBLE` - 8-byte floating point
-- `STRING` - Variable-length string
-
-## Common Tasks
+Missing values (`.`, `.a` to `.z`) are returned as `null`.
 
 ### Check Variable Types
 
 ```java
-List<StataDatasetReader.VariableType> types = reader.getVariableTypes();
-List<String> names = reader.getVariableNames();
+List<StataVarType> types = reader.getVarTypes();
+List<String> names = reader.getVarNames();
 
 for (int i = 0; i < names.size(); i++) {
-    System.out.println(names.get(i) + " is type " + types.get(i));
+    System.out.println(names.get(i) + " is type " + types.get(i)); // e.g. "name is type str20"
 }
 ```
 
@@ -157,39 +123,39 @@ for (int i = 0; i < names.size(); i++) {
 ```java
 import java.io.PrintWriter;
 
-StataDatasetReader reader = new StataDatasetReader("data.dta");
-reader.read();
+try (StataReader reader = new StataReader("data.dta");
+     PrintWriter writer = new PrintWriter("output.csv")) {
+    reader.read();
 
-try (PrintWriter writer = new PrintWriter("output.csv")) {
     // Write header
-    writer.println(String.join(",", reader.getVariableNames()));
-    
-    // Write data
-    Object[][] data = reader.getData();
-    for (int i = 0; i < reader.getNumberOfObservations(); i++) {
+    writer.println(String.join(",", reader.getVarNames()));
+
+    // Write data (missing values as empty cells)
+    for (Map<String, Object> obs : reader.getData()) {
         StringBuilder row = new StringBuilder();
-        for (int j = 0; j < reader.getNumberOfVariables(); j++) {
-            if (j > 0) row.append(",");
-            row.append(data[i][j]);
+        for (Object v : obs.values()) {
+            if (row.length() > 0) row.append(",");
+            row.append(v == null ? "" : v);
         }
         writer.println(row);
     }
 }
 ```
 
+## Supported Stata Formats
+
+Stata4j supports formats 113-115 (Stata 8-12) and 117-121 (Stata 13 and later), in either byte order. See [API.md](API.md) for the full type mapping.
+
 ## Need Help?
 
-- Check the main [README.md](README.md) for API documentation
+- Check [API.md](API.md) for the full API reference
 - Report issues on GitHub: https://github.com/huapeng01016/Stata4j/issues
-- Review the test file for more examples: `src/test/java/io/github/huapeng01016/stata4j/StataDatasetReaderTest.java`
+- Review the tests for more examples: `src/test/java/io/github/huapeng01016/stata4j/StataReaderTest.java`
 
-## Example Programs
+## Example Program
 
-The repository includes example programs in `src/main/java/io/github/huapeng01016/stata4j/`:
+`src/main/java/io/github/huapeng01016/stata4j/example/StataReaderExample.java` is a command-line tool that prints a file's metadata, value labels and first observations:
 
-- `StataDatasetExample.java` - Command-line tool to read and display Stata files
-
-Run the example:
 ```bash
-java -cp target/stata4j-1.0.0.jar io.github.huapeng01016.stata4j.StataDatasetExample mydata.dta
+java -cp target/stata4j-0.1.0.jar io.github.huapeng01016.stata4j.example.StataReaderExample mydata.dta
 ```

@@ -1,193 +1,231 @@
 package io.github.huapeng01016.stata4j;
 
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.io.*;
-import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
-import java.nio.file.Path;
+import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 class StataReaderTest {
-    
+
+    private static final String LONG = "x".repeat(300);
+
+    private static byte[] fixture(String name) throws IOException {
+        try (InputStream in = StataReaderTest.class.getResourceAsStream("/fixtures/" + name)) {
+            assertNotNull(in, "missing fixture " + name);
+            return in.readAllBytes();
+        }
+    }
+
+    private static StataReader read(byte[] bytes) throws IOException, StataFormatException {
+        StataReader reader = new StataReader(new ByteArrayInputStream(bytes));
+        reader.read();
+        return reader;
+    }
+
+    /** Files written by pandas from the frame in src/test/resources/fixtures/make_fixtures.py. */
+    @ParameterizedTest
+    @CsvSource({
+            "v114.dta,     114, false, false",
+            "v117.dta,     117, false, true",
+            "v118.dta,     118, false, true",
+            "v119.dta,     119, false, true",
+            "v118_big.dta, 118, true,  false",
+    })
+    void readsPandasFixture(String file, String release, boolean bigEndian, boolean hasStrL) throws Exception {
+        int rel = Integer.parseInt(release);
+        try (StataReader r = read(fixture(file))) {
+            assertEquals(release, r.getFormat());
+            assertEquals(bigEndian ? ByteOrder.BIG_ENDIAN : ByteOrder.LITTLE_ENDIAN, r.getByteOrder());
+            assertEquals("Stata4j fixture", r.getDatasetLabel());
+            assertEquals(17, r.getTimestamp().length(), r.getTimestamp());
+            assertEquals(3, r.getNumObs());
+
+            List<String> names = rel == 114
+                    ? List.of("b", "i", "l", "f", "d", "s", "grade")
+                    : List.of("b", "i", "l", "f", "d", "s", "grade", "longs", "notes");
+            assertEquals(names, r.getVarNames());
+            assertEquals(names.size(), r.getNumVars());
+            assertEquals("label of grade", r.getVarLabels().get(6));
+
+            List<StataVarType> types = r.getVarTypes();
+            assertEquals(List.of(StataVarType.BYTE, StataVarType.INT, StataVarType.LONG, StataVarType.FLOAT,
+                    StataVarType.DOUBLE, StataVarType.str(5), StataVarType.BYTE), types.subList(0, 7));
+            if (rel >= 117) {
+                assertEquals(StataVarType.str(300), types.get(7));
+                assertEquals(hasStrL ? StataVarType.STRL : StataVarType.str(10), types.get(8));
+            }
+
+            Map<String, Object> o1 = r.getObservation(0);
+            assertEquals((byte) 1, o1.get("b"));
+            assertEquals((short) 1000, o1.get("i"));
+            assertEquals(100000, o1.get("l"));
+            assertEquals(1.5f, o1.get("f"));
+            assertEquals(3.125, o1.get("d"));
+            assertEquals("Alice", o1.get("s"));
+            assertEquals((byte) 0, o1.get("grade"));
+
+            Map<String, Object> o2 = r.getObservation(1);
+            assertEquals((byte) -5, o2.get("b"));
+            assertEquals((short) -1000, o2.get("i"));
+            assertEquals(-100000, o2.get("l"));
+            assertEquals(-2.25f, o2.get("f"));
+            assertEquals(-1e300, o2.get("d"));
+            assertEquals("Bob", o2.get("s"));
+            assertEquals((byte) 1, o2.get("grade"));
+
+            Map<String, Object> o3 = r.getObservation(2);
+            for (String v : List.of("b", "i", "l", "f", "d")) {
+                assertTrue(o3.containsKey(v));
+                assertNull(o3.get(v), v);
+            }
+            assertEquals(rel >= 118 ? "Zoë" : "", o3.get("s"));
+
+            if (rel >= 117) {
+                assertEquals(List.of(LONG, "short", ""),
+                        r.getData().stream().map(o -> o.get("longs")).toList());
+                assertEquals(List.of("first note", "", "first note"),
+                        r.getData().stream().map(o -> o.get("notes")).toList());
+            }
+
+            assertEquals("grade", r.getValueLabelNames().get(6));
+            assertEquals("", r.getValueLabelNames().get(0));
+            assertEquals(Map.of("grade", Map.of(0, "low", 1, "high")), r.getValueLabels());
+
+            assertEquals((byte) 1, r.getValue(0, 0));
+            assertEquals("Bob", r.getValue(1, "s"));
+        }
+    }
+
+    /** Synthetic 120/121 files; see write_alias in make_fixtures.py. */
+    @ParameterizedTest
+    @CsvSource({"v120_alias.dta, 120", "v121_alias.dta, 121"})
+    void readsAliasFixture(String file, String release) throws Exception {
+        try (StataReader r = read(fixture(file))) {
+            assertEquals(release, r.getFormat());
+            assertEquals(List.of("id", "al", "name", "notes"), r.getVarNames());
+            assertEquals(List.of(StataVarType.BYTE, StataVarType.ALIAS, StataVarType.str(3), StataVarType.STRL),
+                    r.getVarTypes());
+            assertEquals(Arrays.asList((byte) 1, null, "a", "n1"), Arrays.asList(r.getObservation(0).values().toArray()));
+            assertEquals(Arrays.asList((byte) 2, null, "bb", ""), Arrays.asList(r.getObservation(1).values().toArray()));
+            assertEquals(Arrays.asList((byte) 3, null, "ccc", "n1"), Arrays.asList(r.getObservation(2).values().toArray()));
+            assertTrue(r.getObservation(0).containsKey("al"));
+        }
+    }
+
     @Test
-    void testStataReaderConstruction() throws IOException {
-        // Test that StataReader can be constructed from different sources
+    void rejectsAliasBeforeFormat120() throws IOException {
+        byte[] bytes = fixture("v118.dta");
+        int types = new String(bytes, StandardCharsets.ISO_8859_1).indexOf("<variable_types>") + "<variable_types>".length();
+        bytes[types] = (byte) 0xF5; // 65525 little-endian
+        bytes[types + 1] = (byte) 0xFF;
+        StataFormatException e = assertThrows(StataFormatException.class, () -> read(bytes));
+        assertTrue(e.getMessage().contains("Alias"), e.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"113, LITTLE_ENDIAN", "115, LITTLE_ENDIAN", "115, BIG_ENDIAN"})
+    void readsLegacyFile(int release, String order) throws Exception {
+        ByteOrder byteOrder = order.equals("BIG_ENDIAN") ? ByteOrder.BIG_ENDIAN : ByteOrder.LITTLE_ENDIAN;
+        try (StataReader r = read(LegacyDtaBuilder.build(release, byteOrder))) {
+            assertEquals(Integer.toString(release), r.getFormat());
+            assertEquals(byteOrder, r.getByteOrder());
+            assertEquals("Legacy fixture", r.getDatasetLabel());
+            assertEquals("24 Sep 2026 09:00", r.getTimestamp());
+            assertEquals(List.of("id", "code", "big", "x", "y", "name", "grade"), r.getVarNames());
+            assertEquals(StataVarType.str(8), r.getVarTypes().get(5));
+            assertEquals("label of x", r.getVarLabels().get(3));
+            assertEquals("%9.0g", r.getFmtList().get(0));
+
+            assertEquals(Arrays.asList((byte) 1, (short) 1000, 100000, 1.5f, 3.125, "Alice", (byte) 0),
+                    List.copyOf(r.getObservation(0).values()));
+            assertEquals(Arrays.asList((byte) 100, (short) 32740, 2147483620, -2.25f, -1e300, "Zoë", (byte) 1),
+                    List.copyOf(r.getObservation(1).values()));
+            assertEquals(Arrays.asList(null, null, null, null, null, "12345678", null),
+                    Arrays.asList(r.getObservation(2).values().toArray()));
+
+            assertEquals(List.of("", "", "", "", "", "", "gradelbl"), r.getValueLabelNames());
+            assertEquals(Map.of("gradelbl", Map.of(0, "low", 1, "high")), r.getValueLabels());
+        }
+    }
+
+    @Test
+    void rejectsNonStataInput() {
+        assertThrows(StataFormatException.class, () -> read("999".getBytes(StandardCharsets.US_ASCII)));
+    }
+
+    @Test
+    void rejectsUnsupportedLegacyRelease() {
+        byte[] bytes = LegacyDtaBuilder.build(115, ByteOrder.LITTLE_ENDIAN);
+        bytes[0] = 112;
+        StataFormatException e = assertThrows(StataFormatException.class, () -> read(bytes));
+        assertTrue(e.getMessage().contains("112"), e.getMessage());
+    }
+
+    @Test
+    void rejectsUnsupportedTaggedRelease() throws IOException {
+        byte[] bytes = fixture("v119.dta");
+        String header = "<stata_dta><header><release>";
+        bytes[header.length() + 2] = '0'; // 119 -> 110
+        StataFormatException e = assertThrows(StataFormatException.class, () -> read(bytes));
+        assertTrue(e.getMessage().contains("110"), e.getMessage());
+    }
+
+    @Test
+    void rejectsMisplacedTag() throws IOException {
+        byte[] bytes = fixture("v117.dta");
+        String s = new String(bytes, StandardCharsets.ISO_8859_1);
+        int at = s.indexOf("<varnames>") + "<varname".length();
+        bytes[at] = 'z';
+        StataFormatException e = assertThrows(StataFormatException.class, () -> read(bytes));
+        assertTrue(e.getMessage().contains("<varnames>"), e.getMessage());
+    }
+
+    @Test
+    void truncatedFilesThrowEof() throws IOException {
+        byte[] tagged = fixture("v118.dta");
+        assertThrows(EOFException.class, () -> read(Arrays.copyOf(tagged, tagged.length / 2)));
+        byte[] legacy = LegacyDtaBuilder.build(115, ByteOrder.LITTLE_ENDIAN);
+        assertThrows(EOFException.class, () -> read(Arrays.copyOf(legacy, 200)));
+        assertThrows(EOFException.class, () -> read(new byte[0]));
+    }
+
+    @Test
+    void readOnlyOnce() throws Exception {
+        try (StataReader r = read(fixture("v118.dta"))) {
+            assertThrows(IllegalStateException.class, r::read);
+        }
+    }
+
+    @Test
+    void accessorsValidateArguments() throws Exception {
+        try (StataReader r = read(fixture("v118.dta"))) {
+            assertThrows(IndexOutOfBoundsException.class, () -> r.getObservation(-1));
+            assertThrows(IndexOutOfBoundsException.class, () -> r.getObservation(3));
+            assertThrows(IndexOutOfBoundsException.class, () -> r.getValue(0, 9));
+            assertThrows(IllegalArgumentException.class, () -> r.getValue(0, "nonexistent"));
+            assertThrows(UnsupportedOperationException.class, () -> r.getObservation(0).put("b", null));
+        }
+    }
+
+    @Test
+    void gettersBeforeReadAreEmpty() {
+        StataReader r = new StataReader(new ByteArrayInputStream(new byte[0]));
+        assertNull(r.getFormat());
+        assertTrue(r.getVarNames().isEmpty());
+        assertTrue(r.getData().isEmpty());
+        assertTrue(r.getValueLabels().isEmpty());
+    }
+
+    @Test
+    void missingFileThrows() {
         assertThrows(FileNotFoundException.class, () -> new StataReader("nonexistent.dta"));
-    }
-    
-    @Test
-    void testInvalidFormat(@TempDir Path tempDir) throws IOException {
-        // Create a file with invalid format
-        File testFile = tempDir.resolve("invalid.dta").toFile();
-        try (FileOutputStream fos = new FileOutputStream(testFile)) {
-            fos.write("999".getBytes()); // Invalid format
-        }
-        
-        StataReader reader = new StataReader(testFile);
-        assertThrows(StataFormatException.class, reader::read);
-        reader.close();
-    }
-    
-    @Test
-    void testSimpleStataFile(@TempDir Path tempDir) throws IOException, StataFormatException {
-        // Create a minimal valid Stata file
-        File testFile = tempDir.resolve("test.dta").toFile();
-        createMinimalStataFile(testFile);
-        
-        try (StataReader reader = new StataReader(testFile)) {
-            reader.read();
-            
-            assertEquals("117", reader.getFormat());
-            assertEquals(2, reader.getNumVars());
-            assertEquals(3, reader.getNumObs());
-            
-            List<String> varNames = reader.getVarNames();
-            assertEquals(2, varNames.size());
-            assertEquals("id", varNames.get(0));
-            assertEquals("name", varNames.get(1));
-            
-            List<StataVarType> varTypes = reader.getVarTypes();
-            assertEquals(2, varTypes.size());
-            assertEquals(StataVarType.BYTE, varTypes.get(0));
-            assertEquals(StataVarType.STR10, varTypes.get(1));
-            
-            List<Map<String, Object>> data = reader.getData();
-            assertEquals(3, data.size());
-            
-            // Check first observation
-            Map<String, Object> obs1 = data.get(0);
-            assertEquals((byte)1, obs1.get("id"));
-            assertEquals("Alice", obs1.get("name"));
-            
-            // Check second observation
-            Map<String, Object> obs2 = data.get(1);
-            assertEquals((byte)2, obs2.get("id"));
-            assertEquals("Bob", obs2.get("name"));
-            
-            // Check third observation
-            Map<String, Object> obs3 = data.get(2);
-            assertEquals((byte)3, obs3.get("id"));
-            assertEquals("Charlie", obs3.get("name"));
-        }
-    }
-    
-    @Test
-    void testGetObservation(@TempDir Path tempDir) throws IOException, StataFormatException {
-        File testFile = tempDir.resolve("test.dta").toFile();
-        createMinimalStataFile(testFile);
-        
-        try (StataReader reader = new StataReader(testFile)) {
-            reader.read();
-            
-            Map<String, Object> obs = reader.getObservation(1);
-            assertEquals((byte)2, obs.get("id"));
-            assertEquals("Bob", obs.get("name"));
-            
-            assertThrows(IndexOutOfBoundsException.class, () -> reader.getObservation(-1));
-            assertThrows(IndexOutOfBoundsException.class, () -> reader.getObservation(3));
-        }
-    }
-    
-    @Test
-    void testStataVarType() throws StataFormatException {
-        assertEquals(251, StataVarType.BYTE.getCode());
-        assertEquals(252, StataVarType.INT.getCode());
-        assertEquals(253, StataVarType.LONG.getCode());
-        assertEquals(254, StataVarType.FLOAT.getCode());
-        assertEquals(255, StataVarType.DOUBLE.getCode());
-        
-        assertTrue(StataVarType.BYTE.isNumeric());
-        assertFalse(StataVarType.BYTE.isString());
-        
-        assertTrue(StataVarType.STR10.isString());
-        assertFalse(StataVarType.STR10.isNumeric());
-        assertEquals(10, StataVarType.STR10.getStringLength());
-        
-        assertEquals(StataVarType.BYTE, StataVarType.fromCode(251));
-        assertEquals(StataVarType.STR10, StataVarType.fromCode(10));
-        
-        assertThrows(StataFormatException.class, () -> StataVarType.fromCode(250));
-        assertThrows(IllegalStateException.class, () -> StataVarType.BYTE.getStringLength());
-    }
-    
-    private void createMinimalStataFile(File file) throws IOException {
-        try (DataOutputStream dos = new DataOutputStream(new FileOutputStream(file))) {
-            // Header
-            dos.write("117".getBytes()); // Format
-            dos.writeByte(0x01); // Byte order (little-endian)
-            dos.writeByte(0x01); // File type
-            dos.writeByte(0x00); // Unused
-            writeShortLE(dos, (short) 2); // Number of variables
-            writeIntLE(dos, 3); // Number of observations
-            writeString(dos, "", 81); // Dataset label
-            writeString(dos, "13 Oct 2025 10:15", 18); // Timestamp
-            
-            // Variable types
-            dos.writeByte(251); // BYTE
-            dos.writeByte(10);  // STR10
-            
-            // Variable names
-            writeString(dos, "id", 33);
-            writeString(dos, "name", 33);
-            
-            // Sort order (2 vars + 1)
-            writeShortLE(dos, (short) 0);
-            writeShortLE(dos, (short) 0);
-            writeShortLE(dos, (short) 0);
-            
-            // Formats
-            writeString(dos, "%8.0g", 49);
-            writeString(dos, "%10s", 49);
-            
-            // Value label names
-            writeString(dos, "", 33);
-            writeString(dos, "", 33);
-            
-            // Variable labels
-            writeString(dos, "ID", 81);
-            writeString(dos, "Name", 81);
-            
-            // Expansion fields
-            dos.writeByte(0); // End of expansion fields
-            
-            // Data
-            // Observation 1
-            dos.writeByte(1);
-            writeString(dos, "Alice", 10);
-            
-            // Observation 2
-            dos.writeByte(2);
-            writeString(dos, "Bob", 10);
-            
-            // Observation 3
-            dos.writeByte(3);
-            writeString(dos, "Charlie", 10);
-            
-            // Value labels (empty)
-        }
-    }
-    
-    private void writeShortLE(DataOutputStream dos, short value) throws IOException {
-        ByteBuffer buffer = ByteBuffer.allocate(2).order(ByteOrder.LITTLE_ENDIAN);
-        buffer.putShort(value);
-        dos.write(buffer.array());
-    }
-    
-    private void writeIntLE(DataOutputStream dos, int value) throws IOException {
-        ByteBuffer buffer = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN);
-        buffer.putInt(value);
-        dos.write(buffer.array());
-    }
-    
-    private void writeString(DataOutputStream dos, String str, int length) throws IOException {
-        byte[] bytes = new byte[length];
-        byte[] strBytes = str.getBytes("UTF-8");
-        System.arraycopy(strBytes, 0, bytes, 0, Math.min(strBytes.length, length));
-        dos.write(bytes);
     }
 }

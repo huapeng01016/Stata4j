@@ -40,18 +40,29 @@ public class StataReaderExample {
             List<String> varNames = reader.getVarNames();
             List<String> varLabels = reader.getVarLabels();
             List<String> fmtList = reader.getFmtList();
-            
+            List<String> lblNames = reader.getValueLabelNames();
+
             for (int i = 0; i < varNames.size(); i++) {
-                System.out.printf("%d. %s (%s) - %s - Format: %s%n", 
-                    i + 1, 
-                    varNames.get(i), 
+                System.out.printf("%d. %s (%s) - %s - Format: %s%s%n",
+                    i + 1,
+                    varNames.get(i),
                     reader.getVarTypes().get(i),
                     varLabels.get(i),
-                    fmtList.get(i)
+                    fmtList.get(i),
+                    lblNames.get(i).isEmpty() ? "" : " - Value label: " + lblNames.get(i)
                 );
             }
             System.out.println();
-            
+
+            // Print value label sets
+            Map<String, Map<Integer, String>> valueLabels = reader.getValueLabels();
+            if (!valueLabels.isEmpty()) {
+                System.out.println("Value Labels:");
+                System.out.println("-------------");
+                valueLabels.forEach((name, labels) -> System.out.println(name + ": " + labels));
+                System.out.println();
+            }
+
             // Print first few observations
             System.out.println("First 5 Observations:");
             System.out.println("---------------------");
