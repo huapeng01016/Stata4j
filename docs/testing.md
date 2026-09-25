@@ -8,7 +8,7 @@
 ./mvnw test -Dtest=StataReaderTest#readsAliasFixture # one method, all its parameterized cases
 ```
 
-There are 76 tests, counting each parameterized case: 20 in `StataReaderTest`, 15 in `StataReaderSubsetTest`, 5 in `StataVarTypeTest` and 36 in `StataWriterTest`.
+There are 133 tests, counting each parameterized case: 20 in `StataReaderTest`, 15 in `StataReaderSubsetTest`, 28 in `StataReaderFilterTest`, 29 in `DtaFilterTest`, 5 in `StataVarTypeTest` and 36 in `StataWriterTest`.
 
 ## Test sources
 
@@ -16,6 +16,8 @@ There are 76 tests, counting each parameterized case: 20 in `StataReaderTest`, 1
 |---|---|
 | `StataReaderTest` | Reads every fixture and asserts metadata, types, each value, missing values, strL, value labels and accessors; also covers the error paths |
 | `StataReaderSubsetTest` | Selecting variables and observation ranges: every subset read must equal the same projection of a full read |
+| `StataReaderFilterTest` | `filterObservations`: Stata missing-value rules, results against Java predicates, strL filters, combining with ranges and selections |
+| `DtaFilterTest` | Filter parsing without a file: precedence, number and missing constants, string escapes, syntax-error positions, type checks |
 | `StataWriterTest` | Round trips through `StataReader` for 119/120/121 in both byte orders, `<map>` offsets, exact strL cell bytes, timestamps, copying a fixture between formats, and every validation rule |
 | `StataVarTypeTest` | Type-code mapping for both families, width limits, predicates, equality and `toString` |
 | `LegacyDtaBuilder` | Builds 113/115 files byte by byte, in either byte order |
@@ -95,6 +97,17 @@ Other tests:
 - **`resolvesStrLDefinedOutsideTheRange`:** in `v117.dta`, observation 3's strL cell points at observation 1's GSO. The test first checks that the fixture really does this, then reads only observation 3.
 - **`skipsRowsOutsideTheRangeWithoutReadingThem`:** counts the bytes pulled from the stream when reading the last 10 of 100,000 rows. The count must be under a tenth of the file.
 - **`hugeDatasetNeedsARange`:** patches N to 2^31. A full read must fail with a message naming `selectObservations`.
+
+## Filter tests
+
+- **`followsStataMissingValueRules`:** uses the legacy 115 file, in both byte orders, because it's the only one that stores `.a` and `.z`. It checks cases where Stata's rules differ from "missing never matches":
+  - `id > 5` matches `.a`
+  - `id == .` does not match `.a`
+  - `id > .` does match `.a`
+  - `y > .y` matches `.z`
+- **`matchesJavaPredicates`:** runs 17 expressions over a 300-row writer-made dataset (double, int, str#, strL; some missing values) in both byte orders. The expected rows come from Java predicates written separately from the filter code, and each expression must split the rows. For every match it also checks that `getObservationIndex` and the returned values agree.
+- **`filtersOnStrLAcrossLinkedObservations`:** in `v117.dta`, observation 3's strL points to observation 1's string. A filter on that strL must still see the value, even when only observation 3 is in range and the strL variable isn't selected.
+- **`reportsSyntaxErrorsWithPosition`** (in `DtaFilterTest`): pins the 1-based position reported for 14 malformed expressions.
 
 ## Writer tests
 

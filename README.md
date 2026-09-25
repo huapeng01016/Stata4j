@@ -3,7 +3,7 @@ Java library for Stata data management
 
 ## Features
 
-- Read Stata dataset files (.dta), in full or just selected variables and a range of observations
+- Read Stata dataset files (.dta), in full or just selected variables, a range of observations, and observations matching a filter
 - Write Stata dataset files in format 119, 120 or 121, big- or little-endian
 - Support for Stata file formats 113-115 and 117-121 (Stata 8 and later)
 - Handle both little-endian and big-endian byte orders
@@ -71,11 +71,28 @@ try (StataReader reader = new StataReader("big.dta")) {
 }
 ```
 
+### Filtering Observations
+
+Keep only the observations that match a filter expression. Filters compare a variable with a constant and combine comparisons with `&`, `|`, `!` and parentheses:
+
+```java
+try (StataReader reader = new StataReader("survey.dta")) {
+    reader.filterObservations("age >= 18 & (state == \"CA\" | state == \"NY\") & income < .");
+    reader.read();
+
+    reader.getNumObs();              // observations that matched
+    reader.getObservationIndex(0);   // where the first match is in the file
+}
+```
+
+Missing values follow Stata's rules: missing is greater than every number, so `income > 50000` also matches missing income, and `income < .` keeps only non-missing values. See [API.md](API.md#filtering-observations) for the full syntax.
+
 ### Available Methods
 
 - `read()` - Read and parse the Stata dataset
 - `selectVariables(String...)` - Before `read()`: read only these variables, in this order
 - `selectObservations(long from, long to)` - Before `read()`: read only observations `from` (inclusive) to `to` (exclusive)
+- `filterObservations(String expression)` - Before `read()`: read only observations matching the filter
 - `getFormat()` - Get the Stata file format version
 - `getNumVars()` / `getNumObs()` - Get the number of variables / observations read
 - `getTotalNumVars()` / `getTotalNumObs()` - Get the number of variables / observations in the file
@@ -89,6 +106,7 @@ try (StataReader reader = new StataReader("big.dta")) {
 - `getData()` - Get all observations as a list of maps
 - `getObservation(int index)` - Get a specific observation by index
 - `getValue(int obs, int var)` / `getValue(int obs, String name)` - Get a single value
+- `getObservationIndex(int i)` - Get the position in the file of the `i`th observation read
 
 ### Writing a Stata Dataset
 

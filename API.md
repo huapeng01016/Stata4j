@@ -29,6 +29,10 @@ Call these before `read()`; afterwards they throw `IllegalStateException`. Both 
 - `StataReader selectVariables(String... names)` / `selectVariables(Collection<String> names)` - Reads only these variables, **in the order given**. The metadata getters (`getVarNames`, `getVarTypes`, `getVarLabels`, `getFmtList`, `getValueLabelNames`) then cover only these variables, and each observation map has only these keys. A repeated name throws `IllegalArgumentException`. An empty selection reads no variables, but still counts the observations.
 - `StataReader selectObservations(long from, long to)` - Reads only observations `from` (inclusive) to `to` (exclusive), 0-based. The range is clamped to the dataset, so `selectObservations(0, 1000)` on a 500-observation file reads 500, and a range past the end reads none. After reading, index 0 of `getObservation`/`getValue`/`getData` is observation `from` of the file. Throws `IllegalArgumentException` if `from < 0` or `to < from`.
 
+- `StataReader filterObservations(String expression)` - Reads only the observations matching the filter; see [Filtering Observations](#filtering-observations). A syntax error throws `IllegalArgumentException` immediately, with its position. An unknown variable or a type mismatch throws `IllegalArgumentException` from `read()`.
+
+The three can be combined. The filter is applied within the range, and it may use variables that aren't selected.
+
 `getValueLabels()` still returns every value-label set in the file.
 
 ##### Metadata Access
@@ -54,10 +58,48 @@ Call these before `read()`; afterwards they throw `IllegalStateException`. Both 
 - `Map<String, Object> getObservation(int index)` - Returns a specific observation by index (0-based)
 - `Object getValue(int obs, int var)` - Returns one value by observation and variable index (both 0-based)
 - `Object getValue(int obs, String varName)` - Returns one value by observation index and variable name
+- `long getObservationIndex(int obs)` - Returns the 0-based position in the file of observation `obs` as read. This tells you which file observations a filter matched. Without a range or filter it equals `obs`.
 
 ##### Resource Management
 
 - `void close()` - Closes the underlying input stream. StataReader implements AutoCloseable, so it can be used in try-with-resources statements.
+
+### Filtering Observations
+
+`filterObservations` takes a boolean expression over the dataset's variables:
+
+```
+expr       := and ('|' and)*
+and        := unary ('&' unary)*
+unary      := '!' unary | '(' expr ')' | comparison
+comparison := variable op constant
+op         := <  <=  >  >=  ==  !=
+constant   := number | . | .a ... .z | "string"
+```
+
+`!` binds tightest, then `&`, then `|`, as in Stata: `a | b & c` means `a | (b & c)`, and `!a & b` means `(!a) & b`. The variable always comes first (`age > 18`, not `18 < age`).
+
+**Numeric variables** compare with a number (`18`, `-2.5`, `1e6`, `.5`) or a missing value (`.`, `.a`–`.z`), using **Stata's rules**:
+- Missing values are greater than every number, and ordered `. < .a < .b < ... < .z`.
+- So `x > 5` and `x >= 5` are true when `x` is missing. `x < 5`, `x <= 5` and `x == 5` are false.
+- `x < .` keeps only non-missing values: the usual Stata idiom, often combined as `x > 5 & x < .`.
+- `x == .` matches only the system missing value `.`, not `.a`–`.z`; use `x >= .` for any missing value.
+- The stored value is compared exactly. A `float` variable holding 0.1 is not `== 0.1`, because 0.1 can't be stored exactly as a float; this is the same as in Stata. Compare with a range instead.
+
+These rules use the exact missing code stored in the file, even though the values returned by `getData()` show every missing value as `null`.
+
+**String variables** (`str#` and `strL`) support only `==` and `!=` with a double-quoted literal, compared exactly: case-sensitive, and with no trimming. Inside the literal, `\"` is a quote and `\\` a backslash. A binary strL never equals a literal.
+
+Examples:
+
+```java
+reader.filterObservations("age >= 18 & age < 65");
+reader.filterObservations("state == \"CA\" | state == \"NY\"");
+reader.filterObservations("!(income < .)");                  // income is missing
+reader.filterObservations("score > 90 & score < . & name != \"\"");
+```
+
+A filter that uses a strL variable is checked after the strL contents are read, which comes after all the data. So until then the reader keeps every observation in the range, not just the matching ones. Filters on other variable types are applied as each observation is read.
 
 ### StataWriter
 
@@ -248,6 +290,21 @@ try (StataReader reader = new StataReader("big.dta")) {
 }
 ```
 
+### Filtering and Finding the Matching Observations
+
+```java
+try (StataReader reader = new StataReader("survey.dta")) {
+    reader.selectVariables("id", "income")
+          .filterObservations("age >= 18 & (state == \"CA\" | state == \"NY\") & income < .");
+    reader.read();
+    for (int i = 0; i < reader.getNumObs(); i++) {
+        System.out.println("file observation " + reader.getObservationIndex(i) + ": " + reader.getObservation(i));
+    }
+}
+```
+
+`age` and `state` are used by the filter without being selected, so the results only contain `id` and `income`.
+
 ### Processing a Large File in Chunks
 
 A reader reads once, so open a new reader for each chunk:
@@ -328,6 +385,7 @@ StataReader and StataWriter instances are **not thread-safe**. Each thread shoul
 
 - Writes only formats 119, 120 and 121, and can't write alias variables, characteristics, a sort order, or extended missing values (`.a`-`.z`)
 - Does not support Stata file formats older than 113 (Stata 7 and earlier) or format 116
-- At most 2,147,483,647 observations can be read at once; read a larger dataset in ranges with `selectObservations`
+- At most 2,147,483,647 observations can be read at once; read a larger dataset in ranges with `selectObservations`, or with a filter that matches fewer
+- Filters compare a variable with a constant only: no arithmetic, no comparing two variables, and string variables support only `==`/`!=`
 - Characteristics (`char`) are skipped, so an alias variable's target frame and variable are not reported
 - Alias support in formats 120/121 assumes alias variables occupy no bytes in the data section (the published spec lists the type but not its width); it has been tested against synthesized files, not files saved by Stata

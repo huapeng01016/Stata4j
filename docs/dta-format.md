@@ -112,7 +112,14 @@ Stata stores `.` and `.a`–`.z` as the largest values of each type. `StataReade
 | float | 2^127 (`0x7f000000`) | above | just under 2^127 |
 | double | 2^1023 (`0x7fe0000000000000`) | above | just under 2^1023 |
 
-NaN (which isn't valid in a `.dta` file) is also returned as `null`. The reader doesn't tell `.` apart from `.a`–`.z`.
+NaN (which isn't valid in a `.dta` file) is also returned as `null`. The values returned don't tell `.` apart from `.a`–`.z`.
+
+Filters (`filterObservations`) do need that distinction, so they use the raw code:
+- **byte, int, long:** `.a`–`.z` follow `.` one apart.
+- **float:** they're spaced `0x800` apart in the bit pattern, starting at `0x7f000000`.
+- **double:** they're spaced 2^40 apart, starting at `0x7fe0000000000000`.
+
+`DtaFilter.missingKey(k)` maps missing value *k* (0 for `.`, 1–26 for `.a`–`.z`) to `2^1023 × (1 + k/32)`. That is above every valid Stata number and keeps Stata's order.
 
 ## strL
 

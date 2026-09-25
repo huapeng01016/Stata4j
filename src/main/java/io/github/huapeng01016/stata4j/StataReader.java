@@ -44,6 +44,9 @@ public class StataReader implements AutoCloseable {
     private List<String> selectedVars;
     private long obsFrom = 0;
     private long obsTo = Long.MAX_VALUE;
+    private DtaFilter filter;
+    /** 0-based file index of each observation read. */
+    private long[] obsIndex = new long[0];
     private String datasetLabel = "";
     private String timestamp = "";
     private List<String> varNames = List.of();
@@ -134,6 +137,42 @@ public class StataReader implements AutoCloseable {
         return this;
     }
 
+    /**
+     * Reads only the observations matching a filter expression. Call before {@link #read()}.
+     * The filter applies within any {@link #selectObservations range}, and may use
+     * variables that aren't {@link #selectVariables selected}.
+     *
+     * <p>Syntax: comparisons {@code var op constant} with {@code op} one of
+     * {@code < <= > >= == !=}, combined with {@code &} (and), {@code |} (or),
+     * {@code !} (not) and parentheses; {@code !} binds tightest, then {@code &},
+     * then {@code |}. For example:
+     * <pre>{@code age >= 18 & (state == "CA" | state == "NY") & !(income < .)}</pre>
+     *
+     * <ul>
+     * <li>Numeric variables compare with numbers or the missing values {@code .} and
+     *     {@code .a}-{@code .z}. As in Stata, missing is greater than every number
+     *     and {@code . < .a < ... < .z}: {@code x > 5} is true for missing {@code x},
+     *     and {@code x < .} keeps only non-missing values. The stored value is
+     *     compared, so a float variable holding 0.1 does not equal the constant
+     *     0.1 (as in Stata).</li>
+     * <li>String variables ({@code str#} or {@code strL}) support only {@code ==} and
+     *     {@code !=} with a double-quoted literal ({@code \"} and {@code \\} escape),
+     *     compared exactly. A binary strL never equals a literal.</li>
+     * </ul>
+     *
+     * <p>Afterwards {@link #getNumObs()} counts the matching observations and
+     * {@link #getObservationIndex(int)} gives each one's position in the file.
+     *
+     * @throws IllegalArgumentException for a syntax error (with its position). Unknown
+     *                                  variables and type mismatches are reported by {@code read()}.
+     * @throws IllegalStateException    if {@code read()} has already been called
+     */
+    public StataReader filterObservations(String expression) {
+        checkNotRead();
+        filter = DtaFilter.parse(expression);
+        return this;
+    }
+
     private void checkNotRead() {
         if (readCalled) {
             throw new IllegalStateException("read() has already been called");
@@ -210,7 +249,7 @@ public class StataReader implements AutoCloseable {
         }
 
         int[] columns = selectedColumns();
-        List<Map<String, Object>> rows = readData(input, columns, new HashSet<>());
+        DataPass pass = readData(input, columns, bindFilter(), new HashSet<>());
 
         Map<String, Map<Integer, String>> labels = new LinkedHashMap<>();
         while (input.peek() != -1) {
@@ -219,7 +258,7 @@ public class StataReader implements AutoCloseable {
             input.skip(3); // padding
             labels.put(name, readValueLabelTable(input, len));
         }
-        finish(columns, rows, labels);
+        finish(columns, pass, labels);
     }
 
     // Formats 117-119: <stata_dta> with positional, tagged sections.
@@ -300,9 +339,10 @@ public class StataReader implements AutoCloseable {
         input.expect("</characteristics>");
 
         int[] columns = selectedColumns();
+        DtaFilter.Bound bound = bindFilter();
         input.expect("<data>");
         Set<StrLRef> needed = new HashSet<>();
-        List<Map<String, Object>> rows = readData(input, columns, needed);
+        DataPass pass = readData(input, columns, bound, needed);
         input.expect("</data>");
 
         // Load only the GSOs that the cells read refer to. A cell may link to a
@@ -326,7 +366,10 @@ public class StataReader implements AutoCloseable {
             strls.put(key, t == GSO_ASCII ? DtaInput.cString(contents, 0, contents.length, cs) : contents);
         }
         input.expect("</strls>");
-        resolveStrLs(rows, strls);
+        if (pass.deferred != null) {
+            pass.applyDeferredFilter(bound, strls);
+        }
+        resolveStrLs(pass.rows, strls);
 
         input.expect("<value_labels>");
         Map<String, Map<Integer, String>> labels = new LinkedHashMap<>();
@@ -341,7 +384,7 @@ public class StataReader implements AutoCloseable {
         input.expect("</value_labels>");
         input.expect("</stata_dta>");
 
-        finish(columns, rows, labels);
+        finish(columns, pass, labels);
     }
 
     private List<String> readStrings(DtaInput input, int width) throws IOException {
@@ -376,12 +419,52 @@ public class StataReader implements AutoCloseable {
         return columns;
     }
 
+    private DtaFilter.Bound bindFilter() {
+        return filter == null ? null : filter.bind(varNames, varTypes);
+    }
+
+    /** Result of reading {@code <data>}: the rows kept, and where each came from in the file. */
+    private static final class DataPass {
+        final List<Map<String, Object>> rows = new ArrayList<>();
+        final List<Long> obsIndex = new ArrayList<>();
+        /**
+         * Filter inputs per row when the filter reads a strL variable, whose values
+         * are known only after {@code <strls>}; null when the filter was applied while reading.
+         */
+        List<Object[]> deferred;
+
+        /** Keeps the rows whose deferred filter inputs pass, with strL references resolved. */
+        void applyDeferredFilter(DtaFilter.Bound bound, Map<StrLRef, Object> strls) throws StataFormatException {
+            List<Map<String, Object>> keptRows = new ArrayList<>();
+            List<Long> keptIndex = new ArrayList<>();
+            for (int i = 0; i < rows.size(); i++) {
+                double[] nums = (double[]) deferred.get(i)[0];
+                Object[] strs = (Object[]) deferred.get(i)[1];
+                for (int s = 0; s < strs.length; s++) {
+                    if (strs[s] instanceof StrLRef ref) {
+                        strs[s] = lookup(strls, ref);
+                    }
+                }
+                if (bound.test(nums, strs)) {
+                    keptRows.add(rows.get(i));
+                    keptIndex.add(obsIndex.get(i));
+                }
+            }
+            rows.clear();
+            rows.addAll(keptRows);
+            obsIndex.clear();
+            obsIndex.addAll(keptIndex);
+            deferred = null;
+        }
+    }
+
     /**
      * Reads the selected rows and columns of {@code <data>}, skipping the rest
-     * by byte count (every row has the same width). Adds each strL reference
-     * read to {@code strlRefs}. Leaves the input just past the last row.
+     * by byte count (every row has the same width), and applies the filter.
+     * Adds the strL references of the rows kept to {@code strlRefs}. Leaves
+     * the input just past the last row.
      */
-    private List<Map<String, Object>> readData(DtaInput input, int[] columns, Set<StrLRef> strlRefs)
+    private DataPass readData(DtaInput input, int[] columns, DtaFilter.Bound bound, Set<StrLRef> strlRefs)
             throws IOException, StataFormatException {
         int[] outPos = new int[totalVars];
         Arrays.fill(outPos, -1);
@@ -399,21 +482,29 @@ public class StataReader implements AutoCloseable {
 
         long first = Math.min(obsFrom, totalObs);
         long end = Math.min(obsTo, totalObs);
-        if (end - first > Integer.MAX_VALUE) {
-            throw new StataFormatException("Dataset has " + totalObs + " observations; at most "
-                    + Integer.MAX_VALUE + " can be read at once. Use selectObservations to read a range.");
+        if (bound == null && end - first > Integer.MAX_VALUE) {
+            throw tooManyObservations();
         }
-        numObs = (int) (end - first);
 
+        DataPass pass = new DataPass();
+        boolean defer = bound != null && bound.usesStrL();
+        if (defer) {
+            pass.deferred = new ArrayList<>();
+        }
+        List<StrLRef> rowRefs = new ArrayList<>();
         // Bytes to skip before the next value read; merges adjacent skips across columns and rows.
         long pending = bytes(first, rowWidth);
-        // Cap the preallocation so a corrupt N cannot trigger a huge allocation.
-        List<Map<String, Object>> rows = new ArrayList<>(Math.min(numObs, 1 << 16));
-        for (int obs = 0; obs < numObs; obs++) {
+        for (long obs = first; obs < end; obs++) {
             Object[] values = new Object[columns.length];
+            double[] nums = bound == null ? null : new double[bound.numCount()];
+            Object[] strs = bound == null ? null : new Object[bound.strCount()];
+            rowRefs.clear();
             for (int var = 0; var < totalVars; var++) {
                 StataVarType type = varTypes.get(var);
-                if (outPos[var] < 0) {
+                int out = outPos[var];
+                int numSlot = bound == null ? -1 : bound.numSlot(var);
+                int strSlot = bound == null ? -1 : bound.strSlot(var);
+                if (out < 0 && numSlot < 0 && strSlot < 0) {
                     pending += type.getByteWidth();
                     continue;
                 }
@@ -421,20 +512,41 @@ public class StataReader implements AutoCloseable {
                     input.skip(pending);
                     pending = 0;
                 }
-                Object value = readValue(input, type);
+                Object value = readValue(input, type, nums, numSlot);
                 if (value instanceof StrLRef ref) {
-                    strlRefs.add(ref);
+                    rowRefs.add(ref);
                 }
-                values[outPos[var]] = value;
+                if (out >= 0) {
+                    values[out] = value;
+                }
+                if (strSlot >= 0) {
+                    strs[strSlot] = value;
+                }
             }
+            if (bound != null && !defer && !bound.test(nums, strs)) {
+                continue;
+            }
+            if (pass.rows.size() == Integer.MAX_VALUE - 8) {
+                throw tooManyObservations();
+            }
+            strlRefs.addAll(rowRefs);
             Map<String, Object> row = new LinkedHashMap<>();
             for (int i = 0; i < values.length; i++) {
                 row.put(names[i], values[i]);
             }
-            rows.add(row);
+            pass.rows.add(row);
+            pass.obsIndex.add(obs);
+            if (defer) {
+                pass.deferred.add(new Object[] {nums, strs});
+            }
         }
         input.skip(pending + bytes(totalObs - end, rowWidth));
-        return rows;
+        return pass;
+    }
+
+    private StataFormatException tooManyObservations() {
+        return new StataFormatException("Dataset has " + totalObs + " observations; at most "
+                + Integer.MAX_VALUE + " can be read at once. Use selectObservations to read a range.");
     }
 
     private static long bytes(long rows, long rowWidth) throws StataFormatException {
@@ -445,27 +557,52 @@ public class StataReader implements AutoCloseable {
         }
     }
 
-    private Object readValue(DtaInput input, StataVarType type) throws IOException {
+    /**
+     * Reads one value. Missing numbers return null; when {@code keySlot >= 0} the
+     * number's filter sort key (which keeps {@code . < .a < ... < .z} above all
+     * numbers) is also stored in {@code keys[keySlot]}.
+     */
+    private Object readValue(DtaInput input, StataVarType type, double[] keys, int keySlot) throws IOException {
         switch (type.kind()) {
             case BYTE: {
                 byte b = input.i8();
-                return b >= DtaMissing.BYTE ? null : b;
+                boolean missing = b >= DtaMissing.BYTE;
+                if (keySlot >= 0) {
+                    keys[keySlot] = missing ? DtaFilter.missingKey(b - DtaMissing.BYTE) : b;
+                }
+                return missing ? null : b;
             }
             case INT: {
                 short s = input.i16();
-                return s >= DtaMissing.INT ? null : s;
+                boolean missing = s >= DtaMissing.INT;
+                if (keySlot >= 0) {
+                    keys[keySlot] = missing ? DtaFilter.missingKey(s - DtaMissing.INT) : s;
+                }
+                return missing ? null : s;
             }
             case LONG: {
                 int i = input.i32();
-                return i >= DtaMissing.LONG ? null : i;
+                boolean missing = i >= DtaMissing.LONG;
+                if (keySlot >= 0) {
+                    keys[keySlot] = missing ? DtaFilter.missingKey(i - DtaMissing.LONG) : i;
+                }
+                return missing ? null : i;
             }
             case FLOAT: {
                 float f = input.f32();
-                return (f >= DtaMissing.FLOAT || Float.isNaN(f)) ? null : f;
+                boolean missing = f >= DtaMissing.FLOAT || Float.isNaN(f);
+                if (keySlot >= 0) {
+                    keys[keySlot] = missing ? DtaFilter.floatMissingKey(f) : f;
+                }
+                return missing ? null : f;
             }
             case DOUBLE: {
                 double d = input.f64();
-                return (d >= DtaMissing.DOUBLE || Double.isNaN(d)) ? null : d;
+                boolean missing = d >= DtaMissing.DOUBLE || Double.isNaN(d);
+                if (keySlot >= 0) {
+                    keys[keySlot] = missing ? DtaFilter.doubleMissingKey(d) : d;
+                }
+                return missing ? null : d;
             }
             case STR:
                 return input.fixedString(type.getByteWidth(), layout.charset());
@@ -484,20 +621,23 @@ public class StataReader implements AutoCloseable {
         }
     }
 
-    private void resolveStrLs(List<Map<String, Object>> rows, Map<StrLRef, Object> strls)
+    private static void resolveStrLs(List<Map<String, Object>> rows, Map<StrLRef, Object> strls)
             throws StataFormatException {
         for (Map<String, Object> row : rows) {
             for (Map.Entry<String, Object> cell : row.entrySet()) {
                 if (cell.getValue() instanceof StrLRef ref) {
-                    Object value = strls.get(ref);
-                    if (value == null) {
-                        throw new StataFormatException(
-                                "strL (" + ref.v() + "," + ref.o() + ") not found in <strls>");
-                    }
-                    cell.setValue(value);
+                    cell.setValue(lookup(strls, ref));
                 }
             }
         }
+    }
+
+    private static Object lookup(Map<StrLRef, Object> strls, StrLRef ref) throws StataFormatException {
+        Object value = strls.get(ref);
+        if (value == null) {
+            throw new StataFormatException("strL (" + ref.v() + "," + ref.o() + ") not found in <strls>");
+        }
+        return value;
     }
 
     /** Parses {@code n, txtlen, off[n], val[n], txt} into value -> label. */
@@ -534,13 +674,18 @@ public class StataReader implements AutoCloseable {
     }
 
     /** Freezes the rows and narrows the per-variable metadata to the selected columns. */
-    private void finish(int[] columns, List<Map<String, Object>> rows, Map<String, Map<Integer, String>> labels) {
-        List<Map<String, Object>> frozen = new ArrayList<>(rows.size());
-        for (Map<String, Object> row : rows) {
+    private void finish(int[] columns, DataPass pass, Map<String, Map<Integer, String>> labels) {
+        List<Map<String, Object>> frozen = new ArrayList<>(pass.rows.size());
+        for (Map<String, Object> row : pass.rows) {
             frozen.add(Collections.unmodifiableMap(row));
         }
         data = Collections.unmodifiableList(frozen);
         valueLabels = Collections.unmodifiableMap(labels);
+        numObs = frozen.size();
+        obsIndex = new long[numObs];
+        for (int i = 0; i < numObs; i++) {
+            obsIndex[i] = pass.obsIndex.get(i);
+        }
 
         numVars = columns.length;
         varNames = project(varNames, columns);
@@ -588,9 +733,21 @@ public class StataReader implements AutoCloseable {
         return numVars;
     }
 
-    /** Returns the number of observations read: all of them, or those in the selected range. */
+    /** Returns the number of observations read: all of them, or those in the selected range that pass the filter. */
     public int getNumObs() {
         return numObs;
+    }
+
+    /**
+     * Returns the 0-based position in the file of observation {@code index} as read.
+     * Without a range or filter this is {@code index}; with a range it is offset by
+     * the range start; with a filter it identifies which file observation matched.
+     */
+    public long getObservationIndex(int index) {
+        if (index < 0 || index >= obsIndex.length) {
+            throw new IndexOutOfBoundsException("Observation index out of bounds: " + index);
+        }
+        return obsIndex[index];
     }
 
     /** Returns the number of variables in the file, regardless of any selection. */

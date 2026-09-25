@@ -1,5 +1,26 @@
 # Changes (September 2026)
 
+## Filtering observations
+
+`StataReader.filterObservations(String expression)` reads only the observations that match a filter, such as `age >= 18 & (state == "CA" | state == "NY") & income < .`.
+
+- **Syntax:** comparisons `variable op constant` (`<`, `<=`, `>`, `>=`, `==`, `!=`), combined with `&`, `|`, `!` and parentheses. `!` binds tightest, then `&`, then `|`, as in Stata. The request was for `a | b`, `a & b` and `!a` over simple comparisons; full nesting with parentheses and `!=` were added because they cost little and avoid awkward rewrites.
+- **Missing values follow Stata** (chosen over SQL-style "missing never matches"): missing is greater than every number, and ordered `. < .a < ... < .z`. So `x > 5` matches missing `x`, `x < .` means non-missing, and `x == .` matches only system missing.
+  - The reader returns every missing value as `null`, which loses `.a` versus `.z`. So the filter compares on the raw stored code, mapped to a sort key that keeps Stata's order (`DtaFilter.missingKey`).
+- **String variables** (`str#`, `strL`): `==`/`!=` with an exact, case-sensitive match.
+- **Combining:** works with `selectVariables` (filter variables needn't be selected) and `selectObservations` (the filter is applied within the range).
+- **New `getObservationIndex(i)`** gives each result's position in the file, so filtered rows can be traced back.
+- **Errors:** syntax errors are reported when the filter is set, with a 1-based position. Unknown variables, type mismatches, string `<`/`>` and alias variables are reported by `read()`.
+- **Efficiency:**
+  - Rows that fail the filter are dropped as they're read, and only the columns that are selected or filtered on are decoded.
+  - Strings in rejected rows aren't loaded.
+  - A filter on a strL variable has to wait for `<strls>`, so in that case every observation in the range is kept until then.
+- **Code:** `DtaFilter` (package-private) parses the expression and compiles it into a predicate over per-row input slots. `readData` now returns a `DataPass` holding the kept rows, their file indexes, and the deferred inputs for strL filters.
+- **Tests:** `DtaFilterTest` (29, on syntax and precedence) and `StataReaderFilterTest` (28, on behavior), bringing the suite to 133.
+  - Stata missing-value rules are checked on the legacy file that stores `.a`/`.z`, in both byte orders.
+  - 17 expressions run against a 300-row dataset, compared with the same rules written as Java predicates.
+  - A strL filter is tested where the matching string is stored with another observation.
+
 ## Reading part of a dataset
 
 `StataReader` can now read a subset of variables and/or a range of observations instead of the whole dataset.
